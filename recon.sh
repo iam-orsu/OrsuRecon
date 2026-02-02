@@ -1102,14 +1102,17 @@ show_banner() {
 show_help() {
     show_banner
     echo "Usage: $0 <domain> [options]"
+    echo "       $0 --list <file>"
     echo ""
     echo "Options:"
+    echo "  --list FILE  Scan multiple domains from a file (one per line)"
     echo "  --install    Install all required dependencies"
     echo "  --check      Run preflight checks without recon"
     echo "  --help       Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0 example.com              # Run full recon"
+    echo "  $0 example.com              # Scan single domain"
+    echo "  $0 --list domains.txt       # Scan multiple domains from file"
     echo "  $0 --install                # Install dependencies"
     echo "  $0 --check                  # Check tool availability"
     echo ""
@@ -1130,6 +1133,106 @@ show_help() {
 # MAIN ENTRY POINT
 # ============================================================================
 
+# Run recon for a single domain
+run_single_domain() {
+    local domain="$1"
+    
+    # Validate domain
+    DOMAIN=$(validate_domain "$domain")
+    if [[ -z "$DOMAIN" ]]; then
+        log_error "Invalid domain: $domain"
+        return 1
+    fi
+    
+    log_info "Target domain: $DOMAIN"
+    
+    # Setup output directory
+    OUTPUT_DIR="./recon-$DOMAIN-$(date +%d-%m-%Y_%H-%M)"
+    setup_directories "$OUTPUT_DIR"
+    
+    log_info "Output directory: $OUTPUT_DIR"
+    
+    # Run main pipeline
+    local start_time
+    start_time=$(date +%s)
+    
+    main_pipeline
+    
+    local end_time
+    end_time=$(date +%s)
+    local total_duration=$((end_time - start_time))
+    
+    echo ""
+    log_success "Recon for $DOMAIN completed in ${total_duration}s"
+    echo ""
+    
+    return 0
+}
+
+# Run recon for multiple domains from a file
+run_from_list() {
+    local list_file="$1"
+    
+    if [[ ! -f "$list_file" ]]; then
+        log_error "List file not found: $list_file"
+        exit 1
+    fi
+    
+    # Count valid domains
+    local domain_count=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip empty lines and comments
+        [[ -z "${line// }" ]] && continue
+        [[ "$line" =~ ^#.*$ ]] && continue
+        ((domain_count++))
+    done < "$list_file"
+    
+    if [[ $domain_count -eq 0 ]]; then
+        log_error "No domains found in $list_file"
+        exit 1
+    fi
+    
+    log_info "Found $domain_count domain(s) in $list_file"
+    echo ""
+    
+    # Process each domain
+    local current=0
+    local successful=0
+    local failed=0
+    
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip empty lines and comments
+        [[ -z "${line// }" ]] && continue
+        [[ "$line" =~ ^#.*$ ]] && continue
+        
+        ((current++))
+        
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  Domain $current of $domain_count: $line"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        
+        if run_single_domain "$line"; then
+            ((successful++))
+        else
+            ((failed++))
+            log_warn "Recon failed for: $line"
+        fi
+        
+    done < "$list_file"
+    
+    # Summary
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  BATCH RECON COMPLETE"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    log_success "Successful: $successful"
+    [[ $failed -gt 0 ]] && log_warn "Failed: $failed"
+    echo ""
+}
+
 main() {
     # Handle flags
     case "${1:-}" in
@@ -1149,20 +1252,28 @@ main() {
             run_preflight_check
             exit $?
             ;;
+        --list)
+            if [[ -z "${2:-}" ]]; then
+                log_error "--list requires a file path"
+                echo "Usage: $0 --list <domains.txt>"
+                exit 1
+            fi
+            show_banner
+            if ! setup_go_env; then
+                log_error "Failed to setup Go environment"
+                exit 1
+            fi
+            run_from_list "$2"
+            exit $?
+            ;;
         "")
             show_help
             exit 1
             ;;
     esac
     
-    # Validate domain
-    DOMAIN=$(validate_domain "$1")
-    if [[ -z "$DOMAIN" ]]; then
-        exit 1
-    fi
-    
+    # Single domain mode
     show_banner
-    log_info "Target domain: $DOMAIN"
     
     # Setup Go environment
     if ! setup_go_env; then
@@ -1170,25 +1281,7 @@ main() {
         exit 1
     fi
     
-    # Setup output directory
-    OUTPUT_DIR="./recon-$DOMAIN-$(date +%d-%m-%Y_%H-%M)"
-    setup_directories "$OUTPUT_DIR"
-    
-    log_info "Output directory: $OUTPUT_DIR"
-    
-    # Run main pipeline
-    local start_time
-    start_time=$(date +%s)
-    
-    main_pipeline
-    
-    local end_time
-    end_time=$(date +%s)
-    local total_duration=$((end_time - start_time))
-    
-    echo ""
-    log_success "Recon completed in ${total_duration}s"
-    echo ""
+    run_single_domain "$1"
 }
 
 # Run main
