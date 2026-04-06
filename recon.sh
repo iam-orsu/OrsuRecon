@@ -1,1288 +1,1408 @@
 #!/bin/bash
-#
-#  ██████╗ ██████╗ ███████╗██╗   ██╗    ██████╗ ███████╗ ██████╗ ██████╗ ███╗   ██╗
-# ██╔═══██╗██╔══██╗██╔════╝██║   ██║    ██╔══██╗██╔════╝██╔════╝██╔═══██╗████╗  ██║
-# ██║   ██║██████╔╝███████╗██║   ██║    ██████╔╝█████╗  ██║     ██║   ██║██╔██╗ ██║
-# ██║   ██║██╔══██╗╚════██║██║   ██║    ██╔══██╗██╔══╝  ██║     ██║   ██║██║╚██╗██║
-# ╚██████╔╝██║  ██║███████║╚██████╔╝    ██║  ██║███████╗╚██████╗╚██████╔╝██║ ╚████║
-#  ╚═════╝ ╚═╝  ╚═╝╚══════╝ ╚═════╝     ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝
-#
-# Production-grade Bug Bounty Recon Framework
-# Compatible with Kali Linux, WSL, and VPS environments
-# 
-# Usage: ./recon.sh <domain> [options]
-#
-# Options:
-#   --install    Install all dependencies
-#   --check      Run preflight checks only
-#   --help       Show this help message
-#
+# ============================================================
+#  recon.sh — Elite Bug Bounty Recon Automation v2
+#  Author: Vamsi | Generated: 2026-03-04
+#  Tested on: WSL Kali Linux, Native Kali Linux
+# ============================================================
 
 set -o pipefail
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
+# ─── CONFIGURATION ──────────────────────────────────────────
+# Discord webhook URL for notifications
+DISCORD_WEBHOOK="https://discordapp.com/api/webhooks/1470700740824535081/iQvdpHUBi_ZnCNfPNWiiuZ6vcxihm5dfWn2OTHVJKsdLM4T7smsArRptRnlz0hYYtF4o"
+STAGE_TIMEOUT=300
+ENABLE_NUCLEI=false 
+SKIP_INSTALL=false
+JS_DOWNLOAD_LIMIT=200
+ARJUN_TIMEOUT=120
+THREADS=5
+TOOLS_DIR="$HOME/tools"
+GO_VERSION="1.22.2"
+RATE_LIMIT_DELAY=5          # seconds to wait between API-heavy tools
+JS_PARALLEL_DOWNLOADS=10    # concurrent JS file downloads
+FRESH_RUN=false             # if true, ignore checkpoint and restart
 
-VERSION="1.0.0"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Colors
+# ─── COLORS ─────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
+BOLD='\033[1m'
 NC='\033[0m'
 
-# Timeouts (seconds)
-TIMEOUT_SUBDOMAIN=600
-TIMEOUT_HTTPX=300
-TIMEOUT_SCREENSHOT=600
-TIMEOUT_CRAWL=600
-TIMEOUT_GAU=300
+# ─── GLOBALS ────────────────────────────────────────────────
+MODE=""
+DOMAIN=""
+TARGET_FILE=""
+OUTPUT_DIR="./recon-output"
+LOG_DIR=""
+CURRENT_STAGE=0
+TOTAL_STAGES=8
+FAILED_STAGES=()
+CHECKPOINT_FILE=""
+SCRIPT_START=""
 
-# Rate limits
-RATE_HTTPX=50
-RATE_SCREENSHOT=2
-RATE_CRAWL=10
-
-# Batch sizes
-BATCH_SIZE=100
-
-# System packages
-SYSTEM_PACKAGES=(
-    "golang-go"
-    "git"
-    "jq"
-    "chromium"
-    "unzip"
-)
-
-# Go tools registry (amass removed - too slow and noisy)
-declare -A GO_TOOLS=(
-    ["subfinder"]="github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
-    ["httpx"]="github.com/projectdiscovery/httpx/cmd/httpx@latest"
-    ["gowitness"]="github.com/sensepost/gowitness@latest"
-    ["gau"]="github.com/lc/gau/v2/cmd/gau@latest"
-    ["katana"]="github.com/projectdiscovery/katana/cmd/katana@latest"
-    ["unfurl"]="github.com/tomnomnom/unfurl@latest"
-)
-
-# Environment detection
-detect_environment() {
-    if [[ -n "$WSL_DISTRO_NAME" ]] || grep -qi microsoft /proc/version 2>/dev/null; then
-        ENVIRONMENT="wsl"
-    elif [[ -f /sys/hypervisor/uuid ]] || [[ -d /sys/class/dmi ]] && grep -qiE 'amazon|google|digitalocean|vultr|linode' /sys/class/dmi/id/product_name 2>/dev/null; then
-        ENVIRONMENT="vps"
-    else
-        ENVIRONMENT="native"
-    fi
-    export ENVIRONMENT
+# ─── BANNER ─────────────────────────────────────────────────
+banner() {
+    echo -e "${MAGENTA}${BOLD}"
+    cat << 'EOF'
+    ____                          __  
+   / __ \___  _________  ____   / /_ 
+  / /_/ / _ \/ ___/ __ \/ __ \ / __ \
+ / _, _/  __/ /__/ /_/ / / / // / / /
+/_/ |_|\___/\___/\____/_/ /_(_)_/ /_/ v2.0
+                                      
+   Elite Bug Bounty Recon Automation
+EOF
+    echo -e "${NC}"
+    echo -e "${CYAN}[*] $(date '+%d-%m-%Y %H:%M:%S') — Starting recon engine${NC}"
+    echo ""
 }
 
-# Tracking params to filter out
-TRACKING_PARAMS=(
-    "utm_source" "utm_medium" "utm_campaign" "utm_term" "utm_content"
-    "fbclid" "gclid" "gclsrc" "dclid" "_ga" "_gid" "mc_eid" "mc_cid"
-    "msclkid" "yclid" "ref" "source" "affiliate" "partner"
-    "trk" "tracking" "track" "campaign" "ad" "adgroup"
-)
-
-# ============================================================================
-# LOGGING FUNCTIONS
-# ============================================================================
-
+# ─── LOGGING FUNCTIONS ──────────────────────────────────────
 log_info() {
-    local timestamp
-    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo -e "${BLUE}[INFO]${NC} $1"
-    [[ -n "$LOG_DIR" ]] && echo "[$timestamp] [INFO] $1" >> "$LOG_DIR/recon.log"
+    echo -e "${CYAN}[*] $(date '+%H:%M:%S') $1${NC}"
+    echo "[INFO] $(date '+%d-%m-%Y %H:%M:%S') $1" >> "$LOG_DIR/recon.log" 2>/dev/null
 }
 
 log_success() {
-    local timestamp
-    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo -e "${GREEN}[✓]${NC} $1"
-    [[ -n "$LOG_DIR" ]] && echo "[$timestamp] [SUCCESS] $1" >> "$LOG_DIR/recon.log"
-}
-
-log_warn() {
-    local timestamp
-    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo -e "${YELLOW}[!]${NC} $1"
-    [[ -n "$LOG_DIR" ]] && echo "[$timestamp] [WARN] $1" >> "$LOG_DIR/recon.log"
+    echo -e "${GREEN}[✓] $(date '+%H:%M:%S') $1${NC}"
+    echo "[SUCCESS] $(date '+%d-%m-%Y %H:%M:%S') $1" >> "$LOG_DIR/recon.log" 2>/dev/null
 }
 
 log_error() {
-    local timestamp
-    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo -e "${RED}[✗]${NC} $1" >&2
-    [[ -n "$LOG_DIR" ]] && echo "[$timestamp] [ERROR] $1" >> "$LOG_DIR/recon.log"
+    echo -e "${RED}[✗] $(date '+%H:%M:%S') $1${NC}"
+    echo "[ERROR] $(date '+%d-%m-%Y %H:%M:%S') $1" >> "$LOG_DIR/recon.log" 2>/dev/null
+    echo "[ERROR] $(date '+%d-%m-%Y %H:%M:%S') $1" >> "$LOG_DIR/errors.log" 2>/dev/null
 }
 
-log_header() {
+log_warn() {
+    echo -e "${YELLOW}[!] $(date '+%H:%M:%S') $1${NC}"
+    echo "[WARN] $(date '+%d-%m-%Y %H:%M:%S') $1" >> "$LOG_DIR/recon.log" 2>/dev/null
+}
+
+log_stage() {
+    CURRENT_STAGE=$((CURRENT_STAGE + 1))
     echo ""
-    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${MAGENTA}  $1${NC}"
-    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${MAGENTA}${BOLD}═══════════════════════════════════════════════════${NC}"
+    echo -e "${MAGENTA}${BOLD}  [$CURRENT_STAGE/$TOTAL_STAGES] $1${NC}"
+    echo -e "${MAGENTA}${BOLD}═══════════════════════════════════════════════════${NC}"
     echo ""
 }
 
-# ============================================================================
-# UTILITY FUNCTIONS
-# ============================================================================
-
-with_timeout() {
-    local seconds="$1"
-    shift
-    timeout --kill-after=10 "$seconds" "$@"
-    local exit_code=$?
-    if [[ $exit_code -eq 124 ]]; then
-        log_warn "Command timed out after ${seconds}s"
-    fi
-    return $exit_code
+# ─── CHECKPOINT / RESUME ─────────────────────────────────────
+save_checkpoint() {
+    local stage_name="$1"
+    echo "$stage_name" >> "$CHECKPOINT_FILE"
 }
 
-validate_domain() {
-    local input="$1"
-    
-    # Strip protocol
-    input="${input#http://}"
-    input="${input#https://}"
-    
-    # Strip trailing slash and path
-    input="${input%%/*}"
-    
-    # Strip wildcard prefix
-    input="${input#\*.}"
-    
-    # Basic validation
-    if [[ -z "$input" ]]; then
-        log_error "Empty domain provided"
-        return 1
+check_checkpoint() {
+    local stage_name="$1"
+    if [[ "$FRESH_RUN" == "true" ]]; then
+        return 1   # not completed, run it
     fi
-    
-    if [[ ! "$input" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
-        log_error "Invalid domain format: $input"
-        return 1
+    if [[ -f "$CHECKPOINT_FILE" ]] && grep -qxF "$stage_name" "$CHECKPOINT_FILE" 2>/dev/null; then
+        log_info "⏭  Skipping '$stage_name' — already completed (checkpoint)"
+        return 0   # completed, skip it
     fi
-    
-    echo "$input"
-    return 0
+    return 1       # not completed, run it
 }
 
-validate_output() {
-    local file="$1"
-    local min_lines="${2:-1}"
-    
-    if [[ ! -f "$file" ]]; then
-        log_warn "Output file not created: $file"
-        return 1
-    fi
-    
-    local line_count
-    line_count=$(wc -l < "$file" 2>/dev/null || echo 0)
-    
-    if [[ "$line_count" -lt "$min_lines" ]]; then
-        log_warn "Output file has fewer than $min_lines lines: $file ($line_count lines)"
-        return 1
-    fi
-    
-    log_info "Output validated: $file ($line_count lines)"
-    return 0
+clear_checkpoint() {
+    rm -f "$CHECKPOINT_FILE"
 }
 
-create_empty_marker() {
-    local file="$1"
-    if [[ ! -f "$file" ]]; then
-        touch "$file"
-    fi
-}
-
-get_chromium_binary() {
-    if command -v chromium &>/dev/null; then
-        echo "chromium"
-    elif command -v chromium-browser &>/dev/null; then
-        echo "chromium-browser"
-    elif command -v google-chrome &>/dev/null; then
-        echo "google-chrome"
-    else
-        echo ""
-    fi
-}
-
-# ============================================================================
-# GO ENVIRONMENT SETUP
-# ============================================================================
-
-setup_go_env() {
-    export GOPATH="${GOPATH:-$HOME/go}"
-    mkdir -p "$GOPATH/bin"
-    
-    if [[ ":$PATH:" != *":$GOPATH/bin:"* ]]; then
-        export PATH="$PATH:$GOPATH/bin"
-    fi
-    
-    if ! command -v go &>/dev/null; then
-        log_error "Go not found. Install with: sudo apt install golang-go"
-        return 1
-    fi
-    
-    local go_version
-    go_version=$(go version 2>/dev/null | awk '{print $3}')
-    log_info "Go version: $go_version"
-    log_info "GOPATH: $GOPATH"
-    
-    return 0
-}
-
-persist_go_path() {
-    local shell_rc="$HOME/.bashrc"
-    local path_line='export PATH="$PATH:$HOME/go/bin"'
-    
-    if ! grep -qF 'go/bin' "$shell_rc" 2>/dev/null; then
-        echo "" >> "$shell_rc"
-        echo "# Go binaries (added by recon.sh)" >> "$shell_rc"
-        echo "$path_line" >> "$shell_rc"
-        log_info "Added Go PATH to $shell_rc"
-    fi
-}
-
-# ============================================================================
-# DEPENDENCY INSTALLATION
-# ============================================================================
-
-install_system_deps() {
-    log_header "Installing System Dependencies"
-    
-    local missing=()
-    
-    for pkg in "${SYSTEM_PACKAGES[@]}"; do
-        if ! dpkg -s "$pkg" &>/dev/null; then
-            # Check for chromium-browser variant
-            if [[ "$pkg" == "chromium" ]] && dpkg -s "chromium-browser" &>/dev/null; then
-                continue
-            fi
-            missing+=("$pkg")
-        fi
-    done
-    
-    if [[ ${#missing[@]} -eq 0 ]]; then
-        log_success "All system packages already installed"
-        return 0
-    fi
-    
-    log_info "Installing missing packages: ${missing[*]}"
-    
-    if ! sudo apt-get update -qq 2>&1; then
-        log_error "apt-get update failed"
-        return 1
-    fi
-    
-    for pkg in "${missing[@]}"; do
-        log_info "Installing $pkg..."
-        if ! sudo apt-get install -y -qq "$pkg" 2>&1; then
-            # Try chromium-browser if chromium fails
-            if [[ "$pkg" == "chromium" ]]; then
-                if sudo apt-get install -y -qq "chromium-browser" 2>&1; then
-                    log_success "Installed chromium-browser (alternative)"
-                    continue
-                fi
-            fi
-            log_error "Failed to install: $pkg"
-        else
-            log_success "Installed $pkg"
-        fi
-    done
-    
-    return 0
-}
-
-install_go_tool() {
+# ─── RATE LIMIT HELPER ───────────────────────────────────────
+rate_limit_pause() {
     local tool_name="$1"
-    local tool_path="${GO_TOOLS[$tool_name]}"
-    
-    if [[ -z "$tool_path" ]]; then
-        log_error "Unknown tool: $tool_name"
-        return 1
+    if [[ "$RATE_LIMIT_DELAY" -gt 0 ]]; then
+        log_info "⏳ Rate-limit pause (${RATE_LIMIT_DELAY}s) before $tool_name..."
+        sleep "$RATE_LIMIT_DELAY"
     fi
-    
-    if command -v "$tool_name" &>/dev/null; then
-        log_success "$tool_name already installed"
+}
+
+# ─── CLEANUP TRAP ────────────────────────────────────────────
+# Recursively find and kill all descendant processes
+kill_descendants() {
+    local pid="$1"
+    local child_pids
+    child_pids=$(ps -o pid= --ppid "$pid" 2>/dev/null) || return
+    for cpid in $child_pids; do
+        kill_descendants "$cpid"
+        kill -KILL "$cpid" 2>/dev/null
+    done
+}
+
+cleanup() {
+    # Disable all traps to prevent re-entry
+    trap '' INT TERM EXIT
+    echo ""
+    echo -e "${YELLOW}[!] Interrupted! Killing all child processes...${NC}"
+    # Log if log dir is available
+    if [[ -n "${LOG_DIR:-}" ]] && [[ -d "${LOG_DIR:-}" ]]; then
+        echo "[WARN] $(date '+%d-%m-%Y %H:%M:%S') Interrupted by user (Ctrl+C)" >> "$LOG_DIR/recon.log" 2>/dev/null
+    fi
+    echo -e "${YELLOW}[!] Partial results saved to: ${OUTPUT_DIR:-./recon-output}${NC}"
+
+    # Step 1: Gracefully terminate all direct children
+    pkill -TERM -P $$ 2>/dev/null
+    sleep 0.5
+
+    # Step 2: Force-kill all descendants (handles nested timeout→tool chains)
+    kill_descendants $$
+
+    # Step 3: Kill entire process group as a final sweep
+    kill -- -$$ 2>/dev/null
+
+    echo -e "${YELLOW}[!] Cleanup complete. Exiting.${NC}"
+    exit 130
+}
+trap cleanup INT TERM
+
+# ─── SAFE RUN WRAPPER ───────────────────────────────────────
+safe_run() {
+    local tool_name="$1"
+    shift
+    local start_time
+    start_time=$(date +%s)
+
+    log_info "Running: $tool_name"
+
+    # Run in background + wait so Ctrl+C trap can fire immediately
+    bash -c "timeout $STAGE_TIMEOUT $*" >> "$LOG_DIR/recon.log" 2>> "$LOG_DIR/errors.log" &
+    local pid=$!
+    if wait $pid; then
+        local elapsed=$(( $(date +%s) - start_time ))
+        log_success "$tool_name completed (${elapsed}s)"
         return 0
-    fi
-    
-    log_info "Installing $tool_name... (this may take a few minutes)"
-    
-    if timeout 300 go install -v "$tool_path" 2>&1 | tail -3; then
-        if command -v "$tool_name" &>/dev/null; then
-            log_success "$tool_name installed successfully"
-            return 0
+    else
+        local exit_code=$?
+        if [[ $exit_code -eq 124 ]]; then
+            log_error "$tool_name TIMED OUT after ${STAGE_TIMEOUT}s — skipping"
         else
-            log_error "$tool_name binary not found after install"
-            return 1
+            log_error "$tool_name FAILED (exit: $exit_code) — continuing"
         fi
-    else
-        log_error "Failed to install $tool_name (timeout or error)"
+        FAILED_STAGES+=("$tool_name")
         return 1
     fi
 }
 
-install_all_go_tools() {
-    log_header "Installing Go Tools"
-    
-    local failed=()
-    
-    for tool in "${!GO_TOOLS[@]}"; do
-        if ! install_go_tool "$tool"; then
-            failed+=("$tool")
-        fi
-    done
-    
-    if [[ ${#failed[@]} -gt 0 ]]; then
-        log_warn "Failed to install: ${failed[*]}"
-        log_warn "Script will skip modules requiring these tools"
-    fi
-    
-    # Symlink Go binaries to /usr/bin for global access
-    symlink_go_tools
-    
-    return 0
+# ─── DISCORD NOTIFICATIONS ──────────────────────────────────
+discord_notify() {
+    local message="$1"
+    [[ -z "$DISCORD_WEBHOOK" ]] && return 0
+
+    local host_name
+    host_name=$(hostname 2>/dev/null || echo "unknown")
+    local timestamp
+    timestamp=$(date '+%d-%m-%Y %H:%M:%S')
+    local target="${DOMAIN:-$TARGET_FILE}"
+
+    local payload
+    payload=$(cat <<EOFPAYLOAD
+{
+    "embeds": [{
+        "title": "🔍 Recon Alert",
+        "color": 3447003,
+        "fields": [
+            {"name": "Target", "value": "\`${target}\`", "inline": true},
+            {"name": "Host", "value": "\`${host_name}\`", "inline": true},
+            {"name": "Stage", "value": "${message}", "inline": false},
+            {"name": "Time", "value": "${timestamp}", "inline": true}
+        ]
+    }]
+}
+EOFPAYLOAD
+)
+
+    curl -s -o /dev/null -m 5 -H "Content-Type: application/json" \
+        -d "$payload" "$DISCORD_WEBHOOK" 2>> "$LOG_DIR/errors.log" &
 }
 
-symlink_go_tools() {
-    log_info "Ensuring all Go tools are globally accessible..."
-    
-    # Get real user's home when running with sudo
-    local real_home
-    if [[ -n "$SUDO_USER" ]]; then
-        real_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-    else
-        real_home="$HOME"
-    fi
-    
-    local user_go_bin="$real_home/go/bin"
-    local root_go_bin="/root/go/bin"
-    
-    for tool in "${!GO_TOOLS[@]}"; do
-        # Step 1: Check if tool already works (installed via apt or already in PATH)
-        if command -v "$tool" &>/dev/null; then
-            local current_path
-            current_path=$(command -v "$tool")
-            log_info "$tool OK at $current_path"
-            continue
-        fi
-        
-        # Step 2: Tool not in PATH, check user's ~/go/bin
-        if [[ -f "$user_go_bin/$tool" ]]; then
-            log_info "Found $tool in $user_go_bin, linking to /usr/bin..."
-            sudo rm -f "/usr/bin/$tool" 2>/dev/null
-            if sudo ln -sf "$user_go_bin/$tool" "/usr/bin/$tool"; then
-                log_success "Linked $tool -> /usr/bin/$tool"
-            else
-                log_warn "Failed to link $tool"
-            fi
-            continue
-        fi
-        
-        # Step 3: Check root's ~/go/bin (if installed with sudo)
-        if [[ -f "$root_go_bin/$tool" ]]; then
-            log_info "Found $tool in $root_go_bin, linking to /usr/bin..."
-            sudo rm -f "/usr/bin/$tool" 2>/dev/null
-            if sudo ln -sf "$root_go_bin/$tool" "/usr/bin/$tool"; then
-                log_success "Linked $tool -> /usr/bin/$tool"
-            else
-                log_warn "Failed to link $tool"
-            fi
-            continue
-        fi
-        
-        # Step 4: Tool not found anywhere
-        log_warn "$tool not found anywhere - will be installed"
-    done
+discord_notify_results() {
+    local stage="$1"
+    local count="$2"
+    discord_notify "✅ ${stage} — **${count}** results found"
 }
 
-validate_chromium() {
-    local chrome_bin
-    chrome_bin=$(get_chromium_binary)
-    
-    if [[ -z "$chrome_bin" ]]; then
-        log_error "Chromium not found"
-        return 1
-    fi
-    
-    log_info "Testing Chromium headless mode..."
-    if "$chrome_bin" --headless --disable-gpu --no-sandbox \
-        --dump-dom "about:blank" &>/dev/null; then
-        log_success "Chromium headless mode works"
-    else
-        log_warn "Chromium headless test failed (screenshots may not work)"
-    fi
-    
-    return 0
+discord_notify_error() {
+    local stage="$1"
+    [[ -z "$DISCORD_WEBHOOK" ]] && return 0
+
+    local host_name
+    host_name=$(hostname 2>/dev/null || echo "unknown")
+    local timestamp
+    timestamp=$(date '+%d-%m-%Y %H:%M:%S')
+    local target="${DOMAIN:-$TARGET_FILE}"
+
+    local payload
+    payload=$(cat <<EOFPAYLOAD
+{
+    "embeds": [{
+        "title": "❌ Recon Stage Failed",
+        "color": 15158332,
+        "fields": [
+            {"name": "Target", "value": "\`${target}\`", "inline": true},
+            {"name": "Host", "value": "\`${host_name}\`", "inline": true},
+            {"name": "Stage", "value": "${stage}", "inline": false},
+            {"name": "Time", "value": "${timestamp}", "inline": true},
+            {"name": "Action", "value": "Check logs/errors.log", "inline": false}
+        ]
+    }]
+}
+EOFPAYLOAD
+)
+
+    curl -s -o /dev/null -m 5 -H "Content-Type: application/json" \
+        -d "$payload" "$DISCORD_WEBHOOK" 2>> "$LOG_DIR/errors.log" &
 }
 
-install_dependencies() {
-    log_header "Dependency Installation"
-    
-    if ! setup_go_env; then
-        log_error "Go environment setup failed"
-        return 1
-    fi
-    
-    if ! install_system_deps; then
-        log_warn "Some system packages failed to install"
-    fi
-    
-    install_all_go_tools
-    
-    validate_chromium || true
-    
-    persist_go_path
-    
-    check_tool_availability
-    
-    log_success "Dependency installation complete"
-    return 0
+discord_notify_summary() {
+    [[ -z "$DISCORD_WEBHOOK" ]] && return 0
+
+    local host_name
+    host_name=$(hostname 2>/dev/null || echo "unknown")
+    local timestamp
+    timestamp=$(date '+%d-%m-%Y %H:%M:%S')
+    local target="${DOMAIN:-$TARGET_FILE}"
+    local duration="$1"
+    local subs="$2"
+    local live="$3"
+    local urls="$4"
+    local jsfiles="$5"
+    local endpoints="$6"
+    local params="$7"
+    local failed_str="${8:-None}"
+
+    local payload
+    payload=$(cat <<EOFPAYLOAD
+{
+    "embeds": [{
+        "title": "🏁 Recon Complete",
+        "color": 3066993,
+        "fields": [
+            {"name": "Target", "value": "\`${target}\`", "inline": true},
+            {"name": "Host", "value": "\`${host_name}\`", "inline": true},
+            {"name": "Duration", "value": "${duration}", "inline": true},
+            {"name": "Subdomains", "value": "${subs}", "inline": true},
+            {"name": "Live Hosts", "value": "${live}", "inline": true},
+            {"name": "URLs", "value": "${urls}", "inline": true},
+            {"name": "JS Files", "value": "${jsfiles}", "inline": true},
+            {"name": "Endpoints", "value": "${endpoints}", "inline": true},
+            {"name": "Params", "value": "${params}", "inline": true},
+            {"name": "Failed Stages", "value": "${failed_str}", "inline": false}
+        ]
+    }]
+}
+EOFPAYLOAD
+)
+
+    curl -s -o /dev/null -m 10 -H "Content-Type: application/json" \
+        -d "$payload" "$DISCORD_WEBHOOK" 2>> "$LOG_DIR/errors.log"
 }
 
-# ============================================================================
-# PREFLIGHT CHECK
-# ============================================================================
-
-check_tool_availability() {
-    echo ""
-    echo "┌─────────────┬────────────┬─────────────────────────────────────────┐"
-    echo "│ Tool        │ Status     │ Path                                    │"
-    echo "├─────────────┼────────────┼─────────────────────────────────────────┤"
-    
-    for tool in subfinder httpx gowitness gau katana unfurl; do
-        local status="❌ Missing"
-        local path="-"
-        
-        if command -v "$tool" &>/dev/null; then
-            status="✅ OK"
-            path=$(command -v "$tool")
-            # Truncate path if too long
-            if [[ ${#path} -gt 39 ]]; then
-                path="...${path: -36}"
-            fi
-        fi
-        
-        printf "│ %-11s │ %-10s │ %-39s │\n" "$tool" "$status" "$path"
-    done
-    
-    echo "└─────────────┴────────────┴─────────────────────────────────────────┘"
-    echo ""
-}
-
-run_preflight_check() {
-    echo ""
-    echo "========================================"
-    echo "  RECON FRAMEWORK PREFLIGHT CHECK"
-    echo "========================================"
-    echo ""
-    
-    local errors=0
-    
-    echo "[1/4] Go Runtime"
+# ─── GO INSTALLATION ────────────────────────────────────────
+install_go() {
     if command -v go &>/dev/null; then
-        echo "  ✅ $(go version)"
-    else
-        echo "  ❌ Go not installed"
-        ((errors++))
+        log_success "Go already installed: $(go version 2>/dev/null)"
+        return 0
     fi
-    
-    echo ""
-    echo "[2/4] System Packages"
-    for pkg in git jq; do
-        if dpkg -s "$pkg" &>/dev/null 2>&1; then
-            echo "  ✅ $pkg"
-        else
-            echo "  ❌ $pkg missing"
-            ((errors++))
+
+    log_info "Installing Go ${GO_VERSION}..."
+
+    local arch
+    arch=$(dpkg --print-architecture 2>/dev/null)
+    if [[ -z "$arch" ]]; then
+        case "$(uname -m)" in
+            x86_64)  arch="amd64" ;;
+            aarch64) arch="arm64" ;;
+            *)       arch="amd64" ;;
+        esac
+    fi
+
+    local tarball="go${GO_VERSION}.linux-${arch}.tar.gz"
+
+    if ! wget -q "https://go.dev/dl/${tarball}" -O "/tmp/${tarball}"; then
+        log_error "Failed to download Go — check internet connection"
+        return 1
+    fi
+
+    if command -v sudo &>/dev/null; then
+        sudo rm -rf /usr/local/go
+        sudo tar -C /usr/local -xzf "/tmp/${tarball}"
+    else
+        rm -rf /usr/local/go
+        tar -C /usr/local -xzf "/tmp/${tarball}"
+    fi
+    rm -f "/tmp/${tarball}"
+
+    export PATH="$PATH:/usr/local/go/bin:$HOME/go/bin"
+    export GOPATH="$HOME/go"
+
+    # Persist to all shell config files
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+        if [[ -f "$rc" ]] || [[ "$rc" == "$HOME/.bashrc" ]]; then
+            if ! grep -q '/usr/local/go/bin' "$rc" 2>/dev/null; then
+                {
+                    echo ''
+                    echo '# Go environment (added by recon.sh)'
+                    echo 'export GOPATH=$HOME/go'
+                    echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin'
+                } >> "$rc"
+            fi
         fi
     done
-    
-    local chrome_bin
-    chrome_bin=$(get_chromium_binary)
-    if [[ -n "$chrome_bin" ]]; then
-        echo "  ✅ chromium ($chrome_bin)"
-    else
-        echo "  ❌ chromium missing"
-        ((errors++))
-    fi
-    
-    echo ""
-    echo "[3/4] Go Tools"
-    check_tool_availability
-    
-    echo "[4/4] Chromium Headless (WSL)"
-    if [[ -n "$chrome_bin" ]]; then
-        if "$chrome_bin" --headless --disable-gpu --no-sandbox \
-            --dump-dom "about:blank" &>/dev/null; then
-            echo "  ✅ Headless mode works"
-        else
-            echo "  ⚠️ Headless mode may have issues"
-        fi
-    else
-        echo "  ❌ Chromium not found"
-        ((errors++))
-    fi
-    
-    echo ""
-    if [[ $errors -eq 0 ]]; then
-        echo "✅ All critical preflight checks passed"
+
+    if command -v go &>/dev/null; then
+        log_success "Go installed: $(go version 2>/dev/null)"
         return 0
     else
-        echo "❌ $errors preflight check(s) failed"
+        log_error "Go installation failed — go binary not found in PATH"
         return 1
     fi
 }
 
-# ============================================================================
-# DIRECTORY SETUP
-# ============================================================================
+# ─── TOOL INSTALLATION ──────────────────────────────────────
+install_go_tool() {
+    local name="$1"
+    local pkg="$2"
 
-setup_directories() {
-    local base_dir="$1"
-    
-    local dirs=(
-        "subdomains"
-        "live"
-        "screenshots"
-        "js"
-        "urls"
-        "params"
-        "interesting"
-        "logs"
+    if command -v "$name" &>/dev/null; then
+        log_info "✓ $name already installed"
+        return 0
+    fi
+
+    log_info "Installing $name..."
+    if go install -v "$pkg" >> "$LOG_DIR/install.log" 2>&1; then
+        if command -v "$name" &>/dev/null; then
+            log_success "$name installed successfully"
+            return 0
+        fi
+    fi
+
+    log_error "$name installation failed — check logs/install.log"
+    return 1
+}
+
+install_pip_tool() {
+    local name="$1"
+    local pkg="$2"
+
+    if command -v "$name" &>/dev/null; then
+        log_info "✓ $name already installed"
+        return 0
+    fi
+
+    log_info "Installing $name via pip3..."
+    # Try pipx first (preferred on modern Kali with PEP 668)
+    if command -v pipx &>/dev/null; then
+        if pipx install "$pkg" >> "$LOG_DIR/install.log" 2>&1; then
+            log_success "$name installed via pipx"
+            return 0
+        fi
+    fi
+    # Fallback: pip3 with --break-system-packages
+    if pip3 install "$pkg" --break-system-packages >> "$LOG_DIR/install.log" 2>&1; then
+        log_success "$name installed via pip3"
+        return 0
+    fi
+    # Fallback: pip3 without flag (older systems)
+    if pip3 install "$pkg" >> "$LOG_DIR/install.log" 2>&1; then
+        log_success "$name installed via pip3"
+        return 0
+    fi
+    log_error "$name pip installation failed"
+    return 1
+}
+
+install_git_tool() {
+    local name="$1"
+    local repo="$2"
+    local dest="$TOOLS_DIR/$name"
+
+    if [[ -d "$dest" ]]; then
+        log_info "✓ $name already cloned"
+        return 0
+    fi
+
+    log_info "Cloning $name..."
+    mkdir -p "$TOOLS_DIR"
+    if git clone --depth 1 "$repo" "$dest" >> "$LOG_DIR/install.log" 2>&1; then
+        # Install Python dependencies if requirements.txt exists
+        if [[ -f "$dest/requirements.txt" ]]; then
+            pip3 install -r "$dest/requirements.txt" --break-system-packages >> "$LOG_DIR/install.log" 2>&1 || \
+            pip3 install -r "$dest/requirements.txt" >> "$LOG_DIR/install.log" 2>&1
+        fi
+        log_success "$name cloned to $dest"
+        return 0
+    else
+        log_error "$name clone failed"
+        return 1
+    fi
+}
+
+check_system_deps() {
+    log_info "Checking system dependencies..."
+    local missing=()
+
+    # Map: command_name -> apt_package_name
+    declare -A cmd_to_pkg=(
+        [curl]="curl" [wget]="wget" [git]="git"
+        [python3]="python3" [pip3]="python3-pip" [jq]="jq"
     )
-    
-    for dir in "${dirs[@]}"; do
-        mkdir -p "$base_dir/$dir"
+
+    for cmd in "${!cmd_to_pkg[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("${cmd_to_pkg[$cmd]}")
+        fi
     done
-    
-    SUBDOMAINS_DIR="$base_dir/subdomains"
-    LIVE_DIR="$base_dir/live"
-    SCREENSHOTS_DIR="$base_dir/screenshots"
-    JS_DIR="$base_dir/js"
-    URLS_DIR="$base_dir/urls"
-    PARAMS_DIR="$base_dir/params"
-    INTERESTING_DIR="$base_dir/interesting"
-    LOG_DIR="$base_dir/logs"
-    
-    echo "=== Recon started at $(date) ===" > "$LOG_DIR/recon.log"
-    echo "=== Domain: $DOMAIN ===" >> "$LOG_DIR/recon.log"
-    : > "$LOG_DIR/module_status.log"
-    
-    log_success "Directory structure created: $base_dir"
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log_warn "Missing system packages: ${missing[*]}"
+        log_info "Attempting to install via apt..."
+        if command -v sudo &>/dev/null; then
+            sudo apt-get update -qq >> "$LOG_DIR/install.log" 2>&1
+            sudo apt-get install -y -qq "${missing[@]}" >> "$LOG_DIR/install.log" 2>&1
+        else
+            apt-get update -qq >> "$LOG_DIR/install.log" 2>&1
+            apt-get install -y -qq "${missing[@]}" >> "$LOG_DIR/install.log" 2>&1
+        fi
+    fi
+
+    log_success "System dependencies OK"
 }
 
-# ============================================================================
-# MODULE WRAPPER
-# ============================================================================
+install_all_tools() {
+    log_stage "Dependency Check & Installation"
 
-run_module() {
-    local module_name="$1"
-    local module_func="$2"
-    local required_tool="$3"
-    
-    log_header "$module_name"
-    
-    if [[ -n "$required_tool" ]] && ! command -v "$required_tool" &>/dev/null; then
-        log_warn "Skipping $module_name: $required_tool not found"
-        echo "$module_name: SKIPPED (missing $required_tool)" >> "$LOG_DIR/module_status.log"
-        return 0
+    check_system_deps
+
+    # Ensure pipx is available (best for Python CLI tools on modern Kali)
+    if ! command -v pipx &>/dev/null; then
+        log_info "Installing pipx..."
+        if command -v sudo &>/dev/null; then
+            sudo apt-get install -y -qq pipx >> "$LOG_DIR/install.log" 2>&1 || true
+        else
+            apt-get install -y -qq pipx >> "$LOG_DIR/install.log" 2>&1 || true
+        fi
+        # Ensure pipx PATH
+        pipx ensurepath >> "$LOG_DIR/install.log" 2>&1 || true
+        export PATH="$PATH:$HOME/.local/bin"
     fi
-    
-    local start_time
-    start_time=$(date +%s)
-    
-    if $module_func 2>&1 | tee -a "$LOG_DIR/recon.log"; then
-        local end_time
-        end_time=$(date +%s)
-        local duration=$((end_time - start_time))
-        
-        log_success "$module_name completed in ${duration}s"
-        echo "$module_name: SUCCESS (${duration}s)" >> "$LOG_DIR/module_status.log"
-    else
-        log_error "$module_name failed"
-        echo "$module_name: FAILED" >> "$LOG_DIR/module_status.log"
-    fi
-    
-    return 0
-}
 
-# ============================================================================
-# RECON MODULES
-# ============================================================================
+    # Go
+    install_go || {
+        log_error "Go installation failed — Go-based tools will be unavailable"
+        discord_notify_error "Go Installation"
+        return 1
+    }
 
-mod_subdomain_enum() {
-    log_info "Starting subdomain enumeration for $DOMAIN"
-    
-    local subfinder_out="$SUBDOMAINS_DIR/subfinder.txt"
-    local all_out="$SUBDOMAINS_DIR/all_subdomains.txt"
-    
-    # Subfinder - primary subdomain enumeration tool
-    if command -v subfinder &>/dev/null; then
-        log_info "Running subfinder..."
-        if with_timeout "$TIMEOUT_SUBDOMAIN" subfinder -d "$DOMAIN" -silent -all -o "$subfinder_out" 2>/dev/null; then
-            if [[ -f "$subfinder_out" ]]; then
-                log_success "Subfinder found $(wc -l < "$subfinder_out") subdomains"
+    # Ensure PATH includes go/bin for this session
+    export PATH="$PATH:/usr/local/go/bin:$HOME/go/bin"
+
+    # Go tools
+    install_go_tool "subfinder"   "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
+    install_go_tool "assetfinder" "github.com/tomnomnom/assetfinder@latest"
+    install_go_tool "httpx"       "github.com/projectdiscovery/httpx/cmd/httpx@latest"
+    install_go_tool "gau"         "github.com/lc/gau/v2/cmd/gau@latest"
+    install_go_tool "waybackurls" "github.com/tomnomnom/waybackurls@latest"
+    install_go_tool "katana"      "github.com/projectdiscovery/katana/cmd/katana@latest"
+    install_go_tool "hakrawler"   "github.com/hakluke/hakrawler@latest"
+    install_go_tool "nuclei"      "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"
+    install_go_tool "gf"          "github.com/tomnomnom/gf@latest"
+    install_go_tool "anew"        "github.com/tomnomnom/anew@latest"
+    install_go_tool "qsreplace"   "github.com/tomnomnom/qsreplace@latest"
+    install_go_tool "unfurl"      "github.com/tomnomnom/unfurl@latest"
+
+    # Python tools — ParamSpider must be git-cloned (not on PyPI)
+    if ! command -v paramspider &>/dev/null; then
+        log_info "Installing ParamSpider via git clone..."
+        local ps_dir="$TOOLS_DIR/ParamSpider"
+        if [[ ! -d "$ps_dir" ]]; then
+            mkdir -p "$TOOLS_DIR"
+            git clone --depth 1 "https://github.com/devanshbatham/ParamSpider.git" "$ps_dir" >> "$LOG_DIR/install.log" 2>&1
+        fi
+        if [[ -d "$ps_dir" ]]; then
+            # Try pipx first
+            if command -v pipx &>/dev/null; then
+                pipx install "$ps_dir" >> "$LOG_DIR/install.log" 2>&1 || true
+            fi
+            # Fallback to pip3 (use absolute path for logs since we cd)
+            if ! command -v paramspider &>/dev/null; then
+                (cd "$ps_dir" && pip3 install . --break-system-packages >> "$LOG_DIR/install.log" 2>&1) || \
+                (cd "$ps_dir" && pip3 install . >> "$LOG_DIR/install.log" 2>&1) || true
+            fi
+            export PATH="$PATH:$HOME/.local/bin"
+            if command -v paramspider &>/dev/null; then
+                log_success "ParamSpider installed"
+            else
+                log_warn "ParamSpider install may have issues — will try direct python3 call"
             fi
         else
-            log_warn "Subfinder failed or timed out"
-            create_empty_marker "$subfinder_out"
+            log_error "ParamSpider clone failed"
         fi
     else
-        log_error "subfinder not found - cannot enumerate subdomains"
-        return 1
+        log_info "✓ paramspider already installed"
     fi
-    
-    # Deduplicate and filter to valid subdomains of target
-    log_info "Normalizing and deduplicating subdomains..."
-    cat "$SUBDOMAINS_DIR"/*.txt 2>/dev/null | \
-        tr '[:upper:]' '[:lower:]' | \
-        sed 's/^\*\.//' | \
-        grep -E '^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$' | \
-        grep -iE "(^|\.)${DOMAIN//./\\.}$" | \
-        sort -u > "$all_out"
-    
-    local total
-    total=$(wc -l < "$all_out" 2>/dev/null || echo 0)
-    log_success "Total unique subdomains: $total"
-    log_info "Saved to: $all_out"
-    
-    if [[ "$total" -eq 0 ]]; then
-        log_error "No subdomains found"
-        return 1
-    fi
-    
-    return 0
-}
 
-mod_live_detection() {
-    local input="$SUBDOMAINS_DIR/all_subdomains.txt"
-    local output="$LIVE_DIR/live.txt"
-    local output_json="$LIVE_DIR/live.json"
-    
-    if [[ ! -s "$input" ]]; then
-        log_error "No subdomains to probe (missing: $input)"
-        return 1
+    # Arjun — try pipx first, then pip3
+    install_pip_tool "arjun" "arjun"
+
+    # Git-cloned tools
+    install_git_tool "LinkFinder"   "https://github.com/GerbenJavado/LinkFinder.git"
+    install_git_tool "SecretFinder" "https://github.com/m4ll0k/SecretFinder.git"
+
+    # Install jsbeautifier — required by both LinkFinder and SecretFinder
+    if ! python3 -c 'import jsbeautifier' 2>/dev/null; then
+        log_info "Installing jsbeautifier (required by LinkFinder/SecretFinder)..."
+        pip3 install jsbeautifier --break-system-packages >> "$LOG_DIR/install.log" 2>&1 || \
+        pip3 install jsbeautifier >> "$LOG_DIR/install.log" 2>&1 || \
+        { command -v pipx &>/dev/null && pipx inject linkfinder jsbeautifier >> "$LOG_DIR/install.log" 2>&1; } || \
+        log_warn "jsbeautifier install failed — LinkFinder/SecretFinder may not work"
+    else
+        log_info "✓ jsbeautifier already installed"
     fi
-    
-    local count
-    count=$(wc -l < "$input")
-    log_info "Probing $count subdomains for live HTTP/HTTPS hosts..."
-    
-    # httpx with follow-redirects, status code filtering
-    if with_timeout "$TIMEOUT_HTTPX" httpx -l "$input" \
-        -silent \
-        -threads "$RATE_HTTPX" \
-        -timeout 10 \
-        -retries 1 \
-        -follow-redirects \
-        -o "$output" \
-        2>/dev/null; then
-        
-        if [[ -f "$output" ]] && [[ -s "$output" ]]; then
-            local live_count
-            live_count=$(wc -l < "$output")
-            log_success "Found $live_count live hosts"
-            log_info "Saved to: $output"
-            
-            # Collect JSON details for the live hosts
-            log_info "Collecting detailed host info..."
-            httpx -l "$output" -silent -json -o "$output_json" 2>/dev/null || true
+
+    # gf patterns
+    if [[ ! -d "$HOME/.gf" ]] || [[ -z "$(ls -A "$HOME/.gf" 2>/dev/null)" ]]; then
+        log_info "Installing gf patterns..."
+        mkdir -p "$HOME/.gf"
+        local gf_tmp="/tmp/gf-patterns-$$"
+        if git clone --depth 1 "https://github.com/tomnomnom/gf.git" "$gf_tmp" >> "$LOG_DIR/install.log" 2>&1; then
+            cp "$gf_tmp/examples/"*.json "$HOME/.gf/" 2>/dev/null
+            rm -rf "$gf_tmp"
+            log_success "gf patterns installed"
+        else
+            log_warn "gf patterns clone failed — gf stage may produce no results"
         fi
     else
-        log_warn "httpx failed or timed out"
+        log_info "✓ gf patterns already installed"
     fi
-    
-    create_empty_marker "$output"
-    
-    if [[ ! -s "$output" ]]; then
-        log_warn "No live hosts detected - downstream modules will be skipped"
-        return 1
+
+    # Create default gau config to suppress "config not found" warning
+    if [[ ! -f "$HOME/.gau.toml" ]]; then
+        log_info "Creating default gau config..."
+        cat > "$HOME/.gau.toml" <<'EOFGAU'
+# gau configuration — created by recon.sh
+threads = 5
+verbose = false
+retries = 3
+subdomains = false
+providers = ["wayback", "commoncrawl", "otx", "urlscan"]
+blacklist = ["ttf", "woff", "svg", "png", "jpg", "jpeg", "gif", "ico", "css"]
+EOFGAU
+        log_success "gau config created at ~/.gau.toml"
     fi
-    
-    return 0
+
+    log_success "Tool installation complete"
 }
 
-mod_screenshot() {
-    local input="$LIVE_DIR/live.txt"
-    local output_dir="$SCREENSHOTS_DIR"
-    
-    if [[ ! -s "$input" ]]; then
-        log_warn "Skipping screenshots: no live hosts in $input"
-        return 0
-    fi
-    
-    local count
-    count=$(wc -l < "$input")
-    log_info "Taking screenshots of $count live hosts..."
-    
-    local chrome_bin
-    chrome_bin=$(get_chromium_binary)
-    
-    # gowitness v3 uses 'scan file' command
-    if with_timeout "$TIMEOUT_SCREENSHOT" gowitness scan file \
-        -f "$input" \
-        -s "$output_dir" \
-        --chrome-path "$chrome_bin" \
-        -t 4 \
-        -T 15 \
-        -q \
-        2>/dev/null; then
-        
-        local screenshot_count
-        screenshot_count=$(find "$output_dir" -name "*.jpeg" -o -name "*.png" 2>/dev/null | wc -l)
-        log_success "Captured $screenshot_count screenshots"
-    else
-        log_warn "gowitness failed or timed out"
-    fi
-    
-    return 0
-}
+# ─── PRE-FLIGHT TOOL VERIFICATION ─────────────────────────────
+verify_tools() {
+    log_info "Verifying all tools are available in PATH..."
 
-mod_url_harvest_gau() {
-    local input="$LIVE_DIR/live.txt"
-    local output="$URLS_DIR/gau.txt"
-    
-    if [[ ! -s "$input" ]]; then
-        log_warn "Skipping gau: no live hosts in $input"
-        return 0
-    fi
-    
-    local count
-    count=$(wc -l < "$input")
-    log_info "Harvesting historical URLs for $count live hosts with gau..."
-    
-    # Extract hostnames from live URLs and query gau for each
-    local temp_hosts="$URLS_DIR/.gau_hosts.tmp"
-    sed -E 's|https?://([^/]+).*|\1|' "$input" | sort -u > "$temp_hosts"
-    
-    # Run gau on each host
-    while IFS= read -r host; do
-        if with_timeout "$TIMEOUT_GAU" gau --threads 5 "$host" 2>/dev/null; then
-            true
+    # Ensure PATH is fully set
+    export PATH="$PATH:/usr/local/go/bin:$HOME/go/bin:$HOME/.local/bin"
+
+    # Define required tools and their install methods
+    # Format: "command|install_type|install_target"
+    local tools=(
+        "subfinder|go|github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
+        "assetfinder|go|github.com/tomnomnom/assetfinder@latest"
+        "httpx|go|github.com/projectdiscovery/httpx/cmd/httpx@latest"
+        "gau|go|github.com/lc/gau/v2/cmd/gau@latest"
+        "waybackurls|go|github.com/tomnomnom/waybackurls@latest"
+        "katana|go|github.com/projectdiscovery/katana/cmd/katana@latest"
+        "hakrawler|go|github.com/hakluke/hakrawler@latest"
+        "nuclei|go|github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"
+        "gf|go|github.com/tomnomnom/gf@latest"
+        "anew|go|github.com/tomnomnom/anew@latest"
+        "qsreplace|go|github.com/tomnomnom/qsreplace@latest"
+        "unfurl|go|github.com/tomnomnom/unfurl@latest"
+        "arjun|pip|arjun"
+    )
+
+    local missing=0
+    local installed=0
+
+    for entry in "${tools[@]}"; do
+        IFS='|' read -r cmd install_type install_target <<< "$entry"
+        if command -v "$cmd" &>/dev/null; then
+            continue
         fi
-    done < "$temp_hosts" >> "$output"
-    
-    rm -f "$temp_hosts"
-    
-    if [[ -f "$output" ]]; then
-        sort -u "$output" -o "$output"
-        log_success "gau found $(wc -l < "$output") historical URLs"
-    fi
-    
-    create_empty_marker "$output"
-    return 0
-}
 
-mod_url_harvest_katana() {
-    local input="$LIVE_DIR/live.txt"
-    local output="$URLS_DIR/katana.txt"
-    
-    if [[ ! -s "$input" ]]; then
-        log_warn "Skipping katana crawl: no live hosts in $input"
-        return 0
-    fi
-    
-    log_info "Crawling live hosts with katana..."
-    
-    local chrome_bin
-    chrome_bin=$(get_chromium_binary)
-    
-    local katana_args=(-list "$input" -silent -o "$output" -jc -d 2 -c "$RATE_CRAWL")
-    
-    # Add headless browser if available
-    if [[ -n "$chrome_bin" ]]; then
-        katana_args+=(-headless -system-chrome)
-    fi
-    
-    if with_timeout "$TIMEOUT_CRAWL" katana "${katana_args[@]}" 2>/dev/null; then
-        if [[ -f "$output" ]]; then
-            log_success "katana found $(wc -l < "$output") URLs"
-        fi
-    else
-        log_warn "katana failed or timed out"
-    fi
-    
-    create_empty_marker "$output"
-    return 0
-}
+        log_warn "$cmd not found in PATH — attempting auto-install..."
+        missing=$((missing + 1))
 
-mod_url_merge() {
-    local output="$URLS_DIR/all.txt"
-    
-    log_info "Merging all discovered URLs..."
-    
-    # Combine all URL sources
-    cat "$URLS_DIR"/*.txt 2>/dev/null | \
-        grep -E "^https?://" | \
-        sort -u > "$output"
-    
-    local total
-    total=$(wc -l < "$output" 2>/dev/null || echo 0)
-    log_success "Total unique URLs: $total"
-    
-    return 0
-}
+        case "$install_type" in
+            go)
+                if command -v go &>/dev/null; then
+                    go install -v "$install_target" >> "$LOG_DIR/install.log" 2>&1 && \
+                        log_success "$cmd installed" && installed=$((installed + 1)) || \
+                        log_error "$cmd auto-install failed"
+                else
+                    log_error "$cmd requires Go but Go is not installed"
+                fi
+                ;;
+            pip)
+                install_pip_tool "$cmd" "$install_target" && installed=$((installed + 1)) || \
+                    log_error "$cmd auto-install failed"
+                ;;
+        esac
+    done
 
-mod_js_discovery() {
-    local input="$URLS_DIR/all.txt"
-    local js_files="$JS_DIR/files.txt"
-    local js_endpoints="$JS_DIR/endpoints.txt"
-    
-    if [[ ! -s "$input" ]]; then
-        log_warn "Skipping JS discovery: no URLs collected"
-        return 0
-    fi
-    
-    log_info "Extracting JavaScript files and endpoints..."
-    
-    # Extract .js file URLs
-    grep -iE '\.js(\?|$)' "$input" | \
-        grep -vE '\.json' | \
-        sort -u > "$js_files"
-    
-    local js_count
-    js_count=$(wc -l < "$js_files" 2>/dev/null || echo 0)
-    log_success "Found $js_count JavaScript files"
-    
-    # Extract potential API endpoints from URLs
-    grep -iE '(/api/|/v[0-9]+/|/graphql|/rest/|/ajax/|/json/)' "$input" | \
-        sort -u > "$js_endpoints"
-    
-    local endpoint_count
-    endpoint_count=$(wc -l < "$js_endpoints" 2>/dev/null || echo 0)
-    log_success "Found $endpoint_count API endpoints"
-    
-    return 0
-}
-
-mod_param_extract() {
-    local input="$URLS_DIR/all.txt"
-    local raw_params="$PARAMS_DIR/raw.txt"
-    local unique_params="$PARAMS_DIR/unique.txt"
-    local filtered_params="$PARAMS_DIR/filtered.txt"
-    
-    if [[ ! -s "$input" ]]; then
-        log_warn "No URLs to extract parameters from"
-        return 0
-    fi
-    
-    log_info "Extracting parameters from URLs..."
-    
-    # Extract parameters using unfurl
-    if command -v unfurl &>/dev/null; then
-        unfurl -u keys < "$input" 2>/dev/null | sort -u > "$raw_params"
-    else
-        # Fallback: basic grep extraction
-        grep -oE '[?&]([^=&]+)=' "$input" | \
-            sed 's/[?&]//g' | \
-            sed 's/=$//g' | \
-            sort -u > "$raw_params"
-    fi
-    
-    # Create unique sorted list
-    sort -u "$raw_params" > "$unique_params"
-    
-    # Filter out tracking params
-    local tracking_regex
-    tracking_regex=$(printf '%s\n' "${TRACKING_PARAMS[@]}" | paste -sd '|')
-    
-    grep -ivE "^($tracking_regex)$" "$unique_params" > "$filtered_params" 2>/dev/null || true
-    
-    local param_count
-    param_count=$(wc -l < "$filtered_params" 2>/dev/null || echo 0)
-    log_success "Found $param_count unique parameters (after filtering)"
-    
-    return 0
-}
-
-mod_interesting_endpoints() {
-    local input="$URLS_DIR/all.txt"
-    
-    if [[ ! -s "$input" ]]; then
-        log_warn "No URLs to analyze"
-        return 0
-    fi
-    
-    log_info "Detecting interesting endpoints..."
-    
-    # Auth endpoints
-    grep -iE '(login|signin|sign-in|auth|oauth|sso|saml|logout|signout|register|signup|password|reset|forgot|2fa|mfa|otp|token|session|jwt)' "$input" | \
-        sort -u > "$INTERESTING_DIR/auth.txt"
-    log_info "Auth endpoints: $(wc -l < "$INTERESTING_DIR/auth.txt")"
-    
-    # Admin endpoints
-    grep -iE '(admin|administrator|manager|dashboard|panel|control|console|backend|cms|wp-admin|phpmyadmin)' "$input" | \
-        sort -u > "$INTERESTING_DIR/admin.txt"
-    log_info "Admin endpoints: $(wc -l < "$INTERESTING_DIR/admin.txt")"
-    
-    # API endpoints
-    grep -iE '(/api/|/v[0-9]+/|/rest/|/graphql|/gql|/swagger|/openapi|/docs/api)' "$input" | \
-        sort -u > "$INTERESTING_DIR/api.txt"
-    log_info "API endpoints: $(wc -l < "$INTERESTING_DIR/api.txt")"
-    
-    # Debug/Development endpoints
-    grep -iE '(debug|test|dev|staging|stage|uat|sandbox|demo|sample|example|poc|internal|temp|tmp|backup|bak|old|copy)' "$input" | \
-        sort -u > "$INTERESTING_DIR/debug.txt"
-    log_info "Debug endpoints: $(wc -l < "$INTERESTING_DIR/debug.txt")"
-    
-    # File/Upload endpoints
-    grep -iE '(upload|file|download|attachment|document|import|export|media|image|photo|asset)' "$input" | \
-        sort -u > "$INTERESTING_DIR/files.txt"
-    log_info "File endpoints: $(wc -l < "$INTERESTING_DIR/files.txt")"
-    
-    # Config/Sensitive files
-    grep -iE '\.(conf|config|cfg|ini|env|yml|yaml|json|xml|bak|backup|log|sql|db|sqlite)(\?|$)' "$input" | \
-        sort -u > "$INTERESTING_DIR/config.txt"
-    log_info "Config files: $(wc -l < "$INTERESTING_DIR/config.txt")"
-    
-    return 0
-}
-
-# ============================================================================
-# SUMMARY GENERATOR
-# ============================================================================
-
-generate_summary() {
-    local summary_file="$OUTPUT_DIR/summary.txt"
-    
-    echo "" 
-    echo "========================================"
-    echo "  RECON SUMMARY: $DOMAIN"
-    echo "  Generated: $(date)"
-    echo "========================================"
-    echo ""
-    
-    {
-        echo "========================================"
-        echo "  RECON SUMMARY: $DOMAIN"
-        echo "  Generated: $(date)"
-        echo "========================================"
-        echo ""
-    } > "$summary_file"
-    
-    # Count results
-    local subs=0 live=0 urls=0 params=0 js=0
-    
-    [[ -f "$SUBDOMAINS_DIR/all_subdomains.txt" ]] && subs=$(wc -l < "$SUBDOMAINS_DIR/all_subdomains.txt")
-    [[ -f "$LIVE_DIR/live.txt" ]] && live=$(wc -l < "$LIVE_DIR/live.txt")
-    [[ -f "$URLS_DIR/all.txt" ]] && urls=$(wc -l < "$URLS_DIR/all.txt")
-    [[ -f "$PARAMS_DIR/filtered.txt" ]] && params=$(wc -l < "$PARAMS_DIR/filtered.txt")
-    [[ -f "$JS_DIR/files.txt" ]] && js=$(wc -l < "$JS_DIR/files.txt")
-    
-    echo "📊 Results:"
-    echo "   Subdomains discovered: $subs"
-    echo "   Live hosts: $live"
-    echo "   URLs collected: $urls"
-    echo "   Unique parameters: $params"
-    echo "   JS files found: $js"
-    echo ""
-    
-    {
-        echo "📊 Results:"
-        echo "   Subdomains discovered: $subs"
-        echo "   Live hosts: $live"
-        echo "   URLs collected: $urls"
-        echo "   Unique parameters: $params"
-        echo "   JS files found: $js"
-        echo ""
-    } >> "$summary_file"
-    
-    # Interesting endpoints summary
-    echo "🎯 Interesting Endpoints:"
-    for f in "$INTERESTING_DIR"/*.txt; do
-        if [[ -f "$f" ]]; then
-            local name
-            name=$(basename "$f" .txt)
-            local count
-            count=$(wc -l < "$f")
-            echo "   $name: $count"
+    # Check git-cloned tools (not in PATH, but need directory + deps)
+    for tool_name in "LinkFinder" "SecretFinder"; do
+        if [[ ! -d "$TOOLS_DIR/$tool_name" ]]; then
+            log_warn "$tool_name not found — will be unavailable"
         fi
     done
-    echo ""
-    
-    {
-        echo "🎯 Interesting Endpoints:"
-        for f in "$INTERESTING_DIR"/*.txt; do
-            if [[ -f "$f" ]]; then
-                local name
-                name=$(basename "$f" .txt)
-                local count
-                count=$(wc -l < "$f")
-                echo "   $name: $count"
+
+    # Check paramspider separately (installed via git clone + pip)
+    if ! command -v paramspider &>/dev/null; then
+        log_warn "paramspider not found — parameter discovery will be limited"
+    fi
+
+    if [[ $missing -eq 0 ]]; then
+        log_success "All tools verified and available ✓"
+    else
+        log_info "Missing: $missing | Auto-installed: $installed | Still missing: $((missing - installed))"
+    fi
+}
+
+# ─── STAGE 1: SUBDOMAIN ENUMERATION ─────────────────────────
+stage_subdomains() {
+    log_stage "Subdomain Enumeration"
+
+    local subs_dir="$OUTPUT_DIR/subdomains"
+    local raw_file="$subs_dir/raw_subs.txt"
+    touch "$raw_file"
+
+    # Build list of domains to enumerate
+    local domains=()
+    if [[ "$MODE" == "domain" ]]; then
+        domains=("$DOMAIN")
+    elif [[ "$MODE" == "list" ]] && [[ -f "$TARGET_FILE" ]]; then
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            domains+=("$line")
+        done < "$TARGET_FILE"
+    fi
+
+    log_info "Enumerating subdomains for ${#domains[@]} domain(s)..."
+
+    for target_domain in "${domains[@]}"; do
+        log_info "─── Enumerating: $target_domain ───"
+
+        # subfinder
+        if command -v subfinder &>/dev/null; then
+            (
+                subfinder -d "$target_domain" -all -silent 2>> "$LOG_DIR/errors.log" >> "$raw_file"
+            ) &
+            local pid_subfinder=$!
+        fi
+
+        # assetfinder
+        if command -v assetfinder &>/dev/null; then
+            (
+                assetfinder --subs-only "$target_domain" 2>> "$LOG_DIR/errors.log" >> "$raw_file"
+            ) &
+            local pid_assetfinder=$!
+        fi
+
+        # crt.sh (curl-based, no tool needed)
+        (
+            curl -s -m 60 "https://crt.sh/?q=%25.${target_domain}&output=json" 2>> "$LOG_DIR/errors.log" \
+                | jq -r '.[].name_value' 2>/dev/null \
+                | sed 's/\*\.//g' \
+                | sort -u >> "$raw_file"
+        ) &
+        local pid_crtsh=$!
+
+        # Wait for all parallel jobs for this domain
+        [[ -n "${pid_subfinder:-}" ]] && wait "$pid_subfinder" 2>/dev/null
+        [[ -n "${pid_assetfinder:-}" ]] && wait "$pid_assetfinder" 2>/dev/null
+        wait "$pid_crtsh" 2>/dev/null
+
+        # Also add the root domain itself
+        echo "$target_domain" >> "$raw_file"
+    done
+
+    # Dedup and remove 'www.' noise
+    sed 's/^www\.//' "$raw_file" | sort -u | grep -v '^$' > "$subs_dir/all.txt"
+    rm -f "$raw_file"
+
+    local count
+    count=$(wc -l < "$subs_dir/all.txt" 2>/dev/null || echo "0")
+    log_success "Subdomain enumeration complete: $count unique subdomains across ${#domains[@]} domain(s)"
+
+    discord_notify_results "Subdomain Enumeration" "$count"
+    save_checkpoint "stage_subdomains"
+}
+
+# ─── STAGE 2: LIVE HOST PROBING ─────────────────────────────
+stage_livehost() {
+    log_stage "Live Host Probing"
+
+    local subs_file="$OUTPUT_DIR/subdomains/all.txt"
+    local subs_dir="$OUTPUT_DIR/subdomains"
+
+    if [[ ! -s "$subs_file" ]]; then
+        log_error "No subdomains found — skipping live host probing"
+        discord_notify_error "Live Host Probing (no input)"
+        return 1
+    fi
+
+    if ! command -v httpx &>/dev/null; then
+        log_error "httpx not available — skipping"
+        return 1
+    fi
+
+    log_info "Running httpx probing..."
+    timeout "$STAGE_TIMEOUT" bash -c "cat '$subs_file' | httpx -silent -sc -title -td -cl -fr -t $THREADS -o '$subs_dir/live_details.csv'" \
+        >> "$LOG_DIR/recon.log" 2>> "$LOG_DIR/errors.log" &
+    wait $! || {
+        log_warn "httpx timed out or failed"
+        FAILED_STAGES+=("httpx")
+    }
+
+    # Extract clean host list (just URLs)
+    if [[ -f "$subs_dir/live_details.csv" ]]; then
+        awk '{print $1}' "$subs_dir/live_details.csv" | sort -u > "$subs_dir/live_hosts.txt"
+
+        local count
+        count=$(wc -l < "$subs_dir/live_hosts.txt" 2>/dev/null || echo "0")
+        log_success "Live hosts: $count responding"
+    else
+        touch "$subs_dir/live_hosts.txt"
+        log_warn "httpx produced no output"
+    fi
+    save_checkpoint "stage_livehost"
+}
+
+
+# ─── STAGE 3: URL COLLECTION ────────────────────────────────
+stage_urls() {
+    log_stage "URL & Endpoint Collection"
+
+    local live_hosts="$OUTPUT_DIR/subdomains/live_hosts.txt"
+    local urls_dir="$OUTPUT_DIR/urls"
+    local raw_file="$urls_dir/raw_urls.txt"
+    touch "$raw_file"
+
+    if [[ ! -s "$live_hosts" ]]; then
+        log_warn "No live hosts — skipping URL collection"
+        touch "$urls_dir/all_urls.txt" "$urls_dir/inscope_urls.txt"
+        return 1
+    fi
+
+    # Create a clean domain-only list (gau/waybackurls need bare domains, not full URLs)
+    local domains_file="$urls_dir/domains_only.txt"
+    sed -E 's|^https?://||; s|/.*||; s|:.*||' "$live_hosts" | sort -u > "$domains_file"
+    log_info "Extracted $(wc -l < "$domains_file") unique domains from live hosts"
+
+    # gau — historical URLs (needs bare domains)
+    if command -v gau &>/dev/null; then
+        log_info "Running gau..."
+        timeout "$STAGE_TIMEOUT" bash -c "cat '$domains_file' | gau --threads $THREADS --verbose" \
+            >> "$raw_file" 2>> "$LOG_DIR/errors.log" &
+        wait $! || {
+            log_warn "gau timed out or failed"
+            FAILED_STAGES+=("gau")
+        }
+        local gau_count=$(wc -l < "$raw_file" 2>/dev/null || echo "0")
+        log_success "gau found $gau_count URLs"
+        rate_limit_pause "waybackurls"
+    fi
+
+    # waybackurls (needs bare domains)
+    if command -v waybackurls &>/dev/null; then
+        log_info "Running waybackurls..."
+        timeout "$STAGE_TIMEOUT" bash -c "cat '$domains_file' | waybackurls" \
+            >> "$raw_file" 2>> "$LOG_DIR/errors.log" &
+        wait $! || {
+            log_warn "waybackurls timed out or failed"
+            FAILED_STAGES+=("waybackurls")
+        }
+        log_success "waybackurls completed (total URLs so far: $(wc -l < "$raw_file" 2>/dev/null || echo "0"))"
+        rate_limit_pause "Wayback CDX / katana"
+    fi
+
+    # Fallback: Direct Wayback CDX API via curl (if gau/waybackurls returned nothing)
+    local url_count_so_far
+    url_count_so_far=$(wc -l < "$raw_file" 2>/dev/null || echo "0")
+    if [[ "$url_count_so_far" -eq 0 ]]; then
+        log_warn "gau/waybackurls returned 0 URLs — using direct Wayback CDX API fallback..."
+        while IFS= read -r domain; do
+            [[ -z "$domain" ]] && continue
+            log_info "Fetching Wayback URLs for: $domain"
+            curl -s -m 120 "https://web.archive.org/cdx/search/cdx?url=*.${domain}/*&output=text&fl=original&collapse=urlkey" \
+                2>> "$LOG_DIR/errors.log" >> "$raw_file" || true
+        done < "$domains_file"
+        local fallback_count
+        fallback_count=$(wc -l < "$raw_file" 2>/dev/null || echo "0")
+        log_success "Wayback CDX fallback found $fallback_count URLs"
+    fi
+
+    # katana — active crawling (accepts full URLs, uses live_hosts directly)
+    if command -v katana &>/dev/null; then
+        rate_limit_pause "katana"
+        local katana_out="$urls_dir/katana_out.txt"
+        log_info "Running katana (timeout: 600s)..."
+        timeout 600 katana -list "$live_hosts" -d 3 -silent -rl 10 -o "$katana_out" \
+            >> "$LOG_DIR/recon.log" 2>> "$LOG_DIR/errors.log" &
+        wait $! || {
+            log_warn "katana timed out or failed — continuing"
+            FAILED_STAGES+=("katana")
+        }
+        [[ -f "$katana_out" ]] && cat "$katana_out" >> "$raw_file"
+    fi
+
+    # hakrawler (accepts full URLs via stdin)
+    if command -v hakrawler &>/dev/null; then
+        rate_limit_pause "hakrawler"
+        log_info "Running hakrawler..."
+        timeout "$STAGE_TIMEOUT" bash -c "cat '$live_hosts' | hakrawler -d 3 -subs" \
+            >> "$raw_file" 2>> "$LOG_DIR/errors.log" &
+        wait $! || {
+            log_warn "hakrawler timed out or failed"
+            FAILED_STAGES+=("hakrawler")
+        }
+        log_success "hakrawler completed"
+    fi
+
+    # Dedup
+    sort -u "$raw_file" | grep -v '^$' > "$urls_dir/all_urls.txt"
+    rm -f "$raw_file"
+
+    # Scope filter — build pattern from domain or all domains in list
+    if [[ "$MODE" == "domain" ]]; then
+        local scope_pattern
+        scope_pattern=$(echo "$DOMAIN" | sed 's/\./\\./g')
+        grep -iE "$scope_pattern" "$urls_dir/all_urls.txt" > "$urls_dir/inscope_urls.txt" 2>/dev/null
+    else
+        # For list mode, keep all URLs (user controls scope)
+        cp "$urls_dir/all_urls.txt" "$urls_dir/inscope_urls.txt"
+    fi
+
+    local count
+    count=$(wc -l < "$urls_dir/inscope_urls.txt" 2>/dev/null || echo "0")
+    log_success "URL collection complete: $count in-scope URLs"
+
+    discord_notify_results "URL Collection" "$count"
+    save_checkpoint "stage_urls"
+}
+
+# ─── STAGE 4: JAVASCRIPT ANALYSIS ───────────────────────────
+stage_js_analysis() {
+    log_stage "JavaScript File Extraction & Analysis"
+
+    local urls_file="$OUTPUT_DIR/urls/inscope_urls.txt"
+    local js_dir="$OUTPUT_DIR/js"
+    mkdir -p "$js_dir/files"
+
+    if [[ ! -s "$urls_file" ]]; then
+        log_warn "No in-scope URLs — skipping JS analysis"
+        return 1
+    fi
+
+    # Extract JS URLs
+    grep -iE '\.js(\?|$)' "$urls_file" 2>/dev/null | sort -u > "$js_dir/js_urls.txt"
+
+    local js_count
+    js_count=$(wc -l < "$js_dir/js_urls.txt" 2>/dev/null || echo "0")
+    log_info "Found $js_count JS file URLs"
+
+    if [[ "$js_count" -eq 0 ]]; then
+        log_warn "No JS files found"
+        touch "$js_dir/linkfinder_results.txt" "$js_dir/secrets_found.txt" "$js_dir/grep_extracts.txt"
+        return 0
+    fi
+
+    # Download JS files (limited) — parallel via xargs
+    log_info "Downloading JS files (max $JS_DOWNLOAD_LIMIT, ${JS_PARALLEL_DOWNLOADS} parallel)..."
+    head -n "$JS_DOWNLOAD_LIMIT" "$js_dir/js_urls.txt" | \
+        xargs -I{} -P "$JS_PARALLEL_DOWNLOADS" bash -c '
+            url="$1"
+            js_dir="$2"
+            filename=$(echo "$url" | md5sum | cut -d" " -f1).js
+            if curl -s -L -m 10 "$url" -o "$js_dir/files/$filename" 2>/dev/null; then
+                echo "$url -> $filename" >> "$js_dir/url_map.txt"
             fi
+        ' _ {} "$js_dir"
+    local dl_count
+    dl_count=$(find "$js_dir/files" -name '*.js' -size +0c 2>/dev/null | wc -l)
+    log_success "Downloaded $dl_count JS files (parallel)"
+
+    # LinkFinder — endpoint extraction
+    touch "$js_dir/linkfinder_results.txt"
+    if [[ -d "$TOOLS_DIR/LinkFinder" ]] && python3 -c 'import jsbeautifier' 2>/dev/null; then
+        log_info "Running LinkFinder on downloaded JS files..."
+        for f in "$js_dir/files/"*.js; do
+            [[ -f "$f" ]] || continue
+            python3 "$TOOLS_DIR/LinkFinder/linkfinder.py" -i "$f" -o cli \
+                >> "$js_dir/linkfinder_results.txt" 2>> "$LOG_DIR/errors.log" || true
         done
-        echo ""
-    } >> "$summary_file"
-    
-    # Module status
-    echo "📋 Module Status:"
-    cat "$LOG_DIR/module_status.log"
-    echo ""
-    
-    {
-        echo "📋 Module Status:"
-        cat "$LOG_DIR/module_status.log"
-        echo ""
-    } >> "$summary_file"
-    
-    echo "📁 Output directory: $OUTPUT_DIR"
-    echo "📄 Full log: $LOG_DIR/recon.log"
-    echo ""
+        sort -u -o "$js_dir/linkfinder_results.txt" "$js_dir/linkfinder_results.txt"
+        log_success "LinkFinder: $(wc -l < "$js_dir/linkfinder_results.txt") endpoints extracted"
+    else
+        log_warn "LinkFinder not available or jsbeautifier missing — skipping"
+    fi
+
+    # SecretFinder — secrets detection
+    touch "$js_dir/secrets_found.txt"
+    if [[ -d "$TOOLS_DIR/SecretFinder" ]] && python3 -c 'import jsbeautifier' 2>/dev/null; then
+        log_info "Running SecretFinder on downloaded JS files..."
+        for f in "$js_dir/files/"*.js; do
+            [[ -f "$f" ]] || continue
+            python3 "$TOOLS_DIR/SecretFinder/SecretFinder.py" -i "$f" -o cli \
+                >> "$js_dir/secrets_found.txt" 2>> "$LOG_DIR/errors.log" || true
+        done
+        sort -u -o "$js_dir/secrets_found.txt" "$js_dir/secrets_found.txt"
+        local secrets_count
+        secrets_count=$(wc -l < "$js_dir/secrets_found.txt" 2>/dev/null || echo "0")
+        if [[ "$secrets_count" -gt 0 ]]; then
+            log_success "SecretFinder: $secrets_count potential secrets found!"
+        else
+            log_info "SecretFinder: no secrets detected"
+        fi
+    else
+        log_warn "SecretFinder not available — skipping"
+    fi
+
+    # Grep-based extraction as fallback/supplement
+    log_info "Running grep-based keyword extraction..."
+    touch "$js_dir/grep_extracts.txt"
+    if [[ -d "$js_dir/files" ]] && compgen -G "$js_dir/files/*.js" >/dev/null 2>&1; then
+        # Extract URLs
+        grep -rhoP 'https?://[^\s"'\''<>]+' "$js_dir/files/" 2>/dev/null | sort -u >> "$js_dir/grep_extracts.txt"
+        # Extract potential secrets
+        grep -rhoiE '(api[_-]?key|api[_-]?secret|token|auth[_-]?token|bearer|jwt|access[_-]?key|password|secret[_-]?key|client[_-]?secret)["\s]*[:=]["\s]*[A-Za-z0-9_\-\.]{8,}' \
+            "$js_dir/files/" 2>/dev/null | sort -u >> "$js_dir/grep_extracts.txt"
+    fi
+
+    local total_endpoints
+    total_endpoints=$(cat "$js_dir/linkfinder_results.txt" "$js_dir/grep_extracts.txt" 2>/dev/null | sort -u | wc -l)
+    log_success "JS analysis complete: $dl_count files, $total_endpoints endpoints/secrets"
+
+    discord_notify_results "JS Discovery" "$dl_count files, $total_endpoints endpoints"
+    save_checkpoint "stage_js_analysis"
 }
 
-# ============================================================================
-# MAIN PIPELINE
-# ============================================================================
+# ─── STAGE 5: PARAMETER DISCOVERY ───────────────────────────
+stage_params() {
+    log_stage "Parameter Discovery"
 
-main_pipeline() {
-    # Phase 1: Subdomain enumeration
-    run_module "Subdomain Enumeration" mod_subdomain_enum "subfinder"
-    
-    # Gate check: Must have subdomains to continue
-    if [[ ! -s "$SUBDOMAINS_DIR/all_subdomains.txt" ]]; then
-        log_error "No subdomains found. Cannot continue."
+    local urls_file="$OUTPUT_DIR/urls/inscope_urls.txt"
+    local endpoints_dir="$OUTPUT_DIR/endpoints"
+
+    touch "$endpoints_dir/all_endpoints.txt" "$endpoints_dir/paramspider_out.txt"
+
+    if [[ ! -s "$urls_file" ]]; then
+        log_warn "No in-scope URLs — skipping parameter discovery"
         return 1
     fi
-    
-    # Phase 2: Live host detection (CRITICAL GATE)
-    run_module "Live Host Detection" mod_live_detection "httpx"
-    
-    # Gate check: live.txt is the source of truth for all downstream modules
-    if [[ ! -s "$LIVE_DIR/live.txt" ]]; then
-        log_warn "No live hosts in live.txt - downstream modules will be skipped."
+
+    # ParamSpider
+    if command -v paramspider &>/dev/null; then
+        log_info "Running ParamSpider..."
+        local target_for_param="${DOMAIN:-$(head -1 "$urls_file" | unfurl domain 2>/dev/null || head -1 "$urls_file")}"
+        safe_run "ParamSpider" \
+            "paramspider -d '$target_for_param'" || true
+        # ParamSpider outputs to results/<domain>.txt or output/ folder
+        if [[ -d "results" ]]; then
+            find results/ -name "*.txt" -exec cat {} + >> "$endpoints_dir/paramspider_out.txt" 2>/dev/null
+            rm -rf results/
+        fi
+        if [[ -d "output" ]]; then
+            find output/ -name "*.txt" -exec cat {} + >> "$endpoints_dir/paramspider_out.txt" 2>/dev/null
+            rm -rf output/
+        fi
+    else
+        log_warn "ParamSpider not available — skipping"
     fi
-    
-    # Phase 3: Parallel data gathering
-    run_module "Screenshots" mod_screenshot "gowitness"
-    run_module "Historical URLs" mod_url_harvest_gau "gau"
-    run_module "Live Crawl" mod_url_harvest_katana "katana"
-    
-    # Phase 4: Processing
-    run_module "URL Merge" mod_url_merge ""
-    run_module "JS Discovery" mod_js_discovery ""
-    run_module "Parameter Extraction" mod_param_extract "unfurl"
-    
-    # Phase 5: Analysis
-    run_module "Interesting Endpoints" mod_interesting_endpoints ""
-    
-    # Generate summary
-    generate_summary
-    
-    return 0
+
+    # Arjun — test top endpoints for hidden params
+    mkdir -p "$endpoints_dir/arjun"
+    if command -v arjun &>/dev/null; then
+        log_info "Running Arjun on top parameterized endpoints..."
+        local arjun_targets
+        arjun_targets=$(head -30 "$urls_file" | grep '?' | head -15)
+        if [[ -n "$arjun_targets" ]]; then
+            local arjun_idx=0
+            while IFS= read -r url; do
+                arjun_idx=$((arjun_idx + 1))
+                log_info "Arjun [$arjun_idx]: $url"
+                timeout "$ARJUN_TIMEOUT" arjun -u "$url" -oJ "$endpoints_dir/arjun/result_${arjun_idx}.json" \
+                    >> "$LOG_DIR/recon.log" 2>> "$LOG_DIR/errors.log" || true
+            done <<< "$arjun_targets"
+            log_success "Arjun scan completed ($arjun_idx URLs tested)"
+        else
+            log_info "No parameterized URLs found for Arjun — skipping"
+        fi
+    else
+        log_warn "Arjun not available — skipping"
+    fi
+
+    # Merge all endpoints
+    cat "$OUTPUT_DIR/js/linkfinder_results.txt" \
+        "$OUTPUT_DIR/js/grep_extracts.txt" \
+        "$endpoints_dir/paramspider_out.txt" \
+        2>/dev/null | sort -u > "$endpoints_dir/all_endpoints.txt"
+
+    local count
+    count=$(wc -l < "$endpoints_dir/all_endpoints.txt" 2>/dev/null || echo "0")
+    log_success "Endpoint discovery complete: $count total endpoints"
+
+    discord_notify_results "Endpoint Discovery" "$count"
+    save_checkpoint "stage_params"
 }
 
-# ============================================================================
-# HELP & USAGE
-# ============================================================================
+# ─── STAGE 6: GF PATTERN MATCHING ───────────────────────────
+stage_patterns() {
+    log_stage "Pattern-Based Vulnerability Fingerprinting"
 
-show_banner() {
-    echo -e "${CYAN}"
-    echo " ██████╗ ██████╗ ███████╗██╗   ██╗    ██████╗ ███████╗ ██████╗ ██████╗ ███╗   ██╗"
-    echo "██╔═══██╗██╔══██╗██╔════╝██║   ██║    ██╔══██╗██╔════╝██╔════╝██╔═══██╗████╗  ██║"
-    echo "██║   ██║██████╔╝███████╗██║   ██║    ██████╔╝█████╗  ██║     ██║   ██║██╔██╗ ██║"
-    echo "██║   ██║██╔══██╗╚════██║██║   ██║    ██╔══██╗██╔══╝  ██║     ██║   ██║██║╚██╗██║"
-    echo "╚██████╔╝██║  ██║███████║╚██████╔╝    ██║  ██║███████╗╚██████╗╚██████╔╝██║ ╚████║"
-    echo " ╚═════╝ ╚═╝  ╚═╝╚══════╝ ╚═════╝     ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝"
-    echo -e "${NC}"
-    echo "  Bug Bounty Recon Framework v$VERSION"
-    detect_environment
-    echo "  Environment: $ENVIRONMENT"
-    echo ""
-}
+    local urls_file="$OUTPUT_DIR/urls/inscope_urls.txt"
+    local params_dir="$OUTPUT_DIR/params"
 
-show_help() {
-    show_banner
-    echo "Usage: $0 <domain> [options]"
-    echo "       $0 --list <file>"
-    echo ""
-    echo "Options:"
-    echo "  --list FILE  Scan multiple domains from a file (one per line)"
-    echo "  --install    Install all required dependencies"
-    echo "  --check      Run preflight checks without recon"
-    echo "  --help       Show this help message"
-    echo ""
-    echo "Examples:"
-    echo "  $0 example.com              # Scan single domain"
-    echo "  $0 --list domains.txt       # Scan multiple domains from file"
-    echo "  $0 --install                # Install dependencies"
-    echo "  $0 --check                  # Check tool availability"
-    echo ""
-    echo "Output Structure:"
-    echo "  recon/"
-    echo "  ├── subdomains/     Discovered subdomains"
-    echo "  ├── live/           Live hosts (HTTP/HTTPS)"
-    echo "  ├── screenshots/    Visual screenshots"
-    echo "  ├── js/             JavaScript files and endpoints"
-    echo "  ├── urls/           All discovered URLs"
-    echo "  ├── params/         Extracted parameters"
-    echo "  ├── interesting/    High-value endpoints"
-    echo "  └── logs/           Execution logs"
-    echo ""
-}
-
-# ============================================================================
-# MAIN ENTRY POINT
-# ============================================================================
-
-# Run recon for a single domain
-run_single_domain() {
-    local domain="$1"
-    
-    # Validate domain
-    DOMAIN=$(validate_domain "$domain")
-    if [[ -z "$DOMAIN" ]]; then
-        log_error "Invalid domain: $domain"
+    if [[ ! -s "$urls_file" ]]; then
+        log_warn "No in-scope URLs — skipping gf patterns"
         return 1
     fi
-    
-    log_info "Target domain: $DOMAIN"
-    
-    # Setup output directory
-    OUTPUT_DIR="./recon-$DOMAIN-$(date +%d-%m-%Y_%H-%M)"
-    setup_directories "$OUTPUT_DIR"
-    
-    log_info "Output directory: $OUTPUT_DIR"
-    
-    # Run main pipeline
-    local start_time
-    start_time=$(date +%s)
-    
-    main_pipeline
-    
+
+    if ! command -v gf &>/dev/null; then
+        log_warn "gf not available — skipping pattern matching"
+        return 1
+    fi
+
+    local patterns=("xss" "sqli" "ssrf" "lfi" "redirect" "idor" "interestingparams")
+    local pattern_files=("xss" "sqli" "ssrf" "lfi" "redirect" "idor" "interesting")
+
+    for i in "${!patterns[@]}"; do
+        local pattern="${patterns[$i]}"
+        local outfile="${pattern_files[$i]}"
+        cat "$urls_file" | gf "$pattern" > "$params_dir/${outfile}.txt" 2>/dev/null || true
+        local count
+        count=$(wc -l < "$params_dir/${outfile}.txt" 2>/dev/null || echo "0")
+        if [[ "$count" -gt 0 ]]; then
+            log_success "gf:$pattern → $count matches"
+        fi
+    done
+
+    # Also try debug_logic if pattern exists
+    cat "$urls_file" | gf debug_logic > "$params_dir/debug.txt" 2>/dev/null || true
+
+    log_success "Pattern matching complete"
+    save_checkpoint "stage_patterns"
+}
+
+# ─── STAGE 7: NUCLEI SCAN (OPTIONAL) ────────────────────────
+stage_nuclei() {
+    log_stage "Nuclei Vulnerability Scan"
+
+    if [[ "$ENABLE_NUCLEI" != "true" ]]; then
+        log_info "Nuclei scanning disabled — use -n flag to enable"
+        return 0
+    fi
+
+    local live_hosts="$OUTPUT_DIR/subdomains/live_hosts.txt"
+
+    if [[ ! -s "$live_hosts" ]]; then
+        log_warn "No live hosts — skipping nuclei scan"
+        return 1
+    fi
+
+    if ! command -v nuclei &>/dev/null; then
+        log_error "nuclei not available — skipping"
+        return 1
+    fi
+
+    # Update nuclei templates first
+    log_info "Updating nuclei templates..."
+    nuclei -ut >> "$LOG_DIR/install.log" 2>&1 || true
+
+    log_info "Running nuclei (critical+high severity, rate-limited)..."
+    timeout "$STAGE_TIMEOUT" nuclei -l "$live_hosts" -s critical,high -rl 10 -bs 5 -c 3 -silent -o "$LOG_DIR/nuclei_findings.txt" \
+        >> "$LOG_DIR/recon.log" 2>> "$LOG_DIR/errors.log" &
+    wait $! || {
+        log_warn "nuclei timed out or failed"
+        FAILED_STAGES+=("nuclei")
+    }
+
+    local count
+    count=$(wc -l < "$LOG_DIR/nuclei_findings.txt" 2>/dev/null || echo "0")
+    if [[ "$count" -gt 0 ]]; then
+        log_success "🔥 Nuclei found $count findings!"
+        discord_notify "🔥 Nuclei found **$count** critical/high findings!"
+    else
+        log_info "Nuclei: no critical/high findings"
+    fi
+    save_checkpoint "stage_nuclei"
+}
+
+# ─── STAGE 8: SUMMARY ───────────────────────────────────────
+stage_summary() {
+    log_stage "Generating Summary"
+
     local end_time
     end_time=$(date +%s)
-    local total_duration=$((end_time - start_time))
-    
+    local elapsed=$(( end_time - SCRIPT_START ))
+    local duration
+    duration="$(( elapsed / 60 ))m $(( elapsed % 60 ))s"
+
+    # Count results
+    local subs live urls jsfiles endpoints params
+    subs=$(wc -l < "$OUTPUT_DIR/subdomains/all.txt" 2>/dev/null || echo "0")
+    live=$(wc -l < "$OUTPUT_DIR/subdomains/live_hosts.txt" 2>/dev/null || echo "0")
+    urls=$(wc -l < "$OUTPUT_DIR/urls/inscope_urls.txt" 2>/dev/null || echo "0")
+    jsfiles=$(wc -l < "$OUTPUT_DIR/js/js_urls.txt" 2>/dev/null || echo "0")
+    endpoints=$(wc -l < "$OUTPUT_DIR/endpoints/all_endpoints.txt" 2>/dev/null || echo "0")
+    params=$(cat "$OUTPUT_DIR/params/"*.txt 2>/dev/null | sort -u | wc -l || echo "0")
+
+    local failed_str="None"
+    if [[ ${#FAILED_STAGES[@]} -gt 0 ]]; then
+        failed_str=$(IFS=', '; echo "${FAILED_STAGES[*]}")
+    fi
+
+    # Write summary file
+    cat > "$LOG_DIR/summary.txt" << EOFSUMMARY
+═══════════════════════════════════════════════════
+  RECON SUMMARY — $(date '+%d-%m-%Y %H:%M:%S')
+═══════════════════════════════════════════════════
+
+  Target:          ${DOMAIN:-$TARGET_FILE}
+  Mode:            $MODE
+  Duration:        $duration
+  Host:            $(hostname 2>/dev/null || echo "unknown")
+
+  ─────────────────────────────────────────────────
+  RESULTS
+  ─────────────────────────────────────────────────
+
+  Subdomains:      $subs
+  Live Hosts:      $live
+  URLs:            $urls
+  JS Files:        $jsfiles
+  Endpoints:       $endpoints
+  Parameters:      $params
+
+  ─────────────────────────────────────────────────
+  STATUS
+  ─────────────────────────────────────────────────
+
+  Failed Stages:   $failed_str
+
+  ─────────────────────────────────────────────────
+  OUTPUT DIRECTORY
+  ─────────────────────────────────────────────────
+
+  $OUTPUT_DIR/
+
+═══════════════════════════════════════════════════
+EOFSUMMARY
+
+    # Display summary
     echo ""
-    log_success "Recon for $DOMAIN completed in ${total_duration}s"
+    cat "$LOG_DIR/summary.txt"
     echo ""
-    
-    return 0
+
+    # Discord final summary
+    discord_notify_summary "$duration" "$subs" "$live" "$urls" "$jsfiles" "$endpoints" "$params" "$failed_str"
 }
 
-# Run recon for multiple domains from a file
-run_from_list() {
-    local list_file="$1"
-    
-    if [[ ! -f "$list_file" ]]; then
-        log_error "List file not found: $list_file"
-        exit 1
-    fi
-    
-    # Count valid domains
-    local domain_count=0
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        # Skip empty lines and comments
-        [[ -z "${line// }" ]] && continue
-        [[ "$line" =~ ^#.*$ ]] && continue
-        ((domain_count++))
-    done < "$list_file"
-    
-    if [[ $domain_count -eq 0 ]]; then
-        log_error "No domains found in $list_file"
-        exit 1
-    fi
-    
-    log_info "Found $domain_count domain(s) in $list_file"
+# ─── USAGE / HELP ────────────────────────────────────────────
+show_help() {
     echo ""
-    
-    # Process each domain
-    local current=0
-    local successful=0
-    local failed=0
-    
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        # Skip empty lines and comments
-        [[ -z "${line// }" ]] && continue
-        [[ "$line" =~ ^#.*$ ]] && continue
-        
-        ((current++))
-        
-        echo ""
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "  Domain $current of $domain_count: $line"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo ""
-        
-        if run_single_domain "$line"; then
-            ((successful++))
-        else
-            ((failed++))
-            log_warn "Recon failed for: $line"
-        fi
-        
-    done < "$list_file"
-    
-    # Summary
+    echo -e "${BOLD}Usage:${NC}"
+    echo "  recon.sh <domain> [options]"
+    echo "  recon.sh -l <file> [options]"
     echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  BATCH RECON COMPLETE"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo -e "${BOLD}Modes:${NC}"
+    echo "  <domain>             Single domain recon (e.g., example.com)"
+    echo "  -l, --list <file>    Process a list of subdomains/domains"
     echo ""
-    log_success "Successful: $successful"
-    [[ $failed -gt 0 ]] && log_warn "Failed: $failed"
+    echo -e "${BOLD}Options:${NC}"
+    echo "  -o, --output <dir>   Output directory (default: ./recon-output)"
+    echo "  -n, --nuclei         Enable nuclei vulnerability scanning"
+    echo "  -s, --skip-install   Skip tool installation checks"
+    echo "  --timeout <sec>      Per-stage timeout in seconds (default: 300)"
+    echo "  --threads <n>        Thread count for tools (default: 5)"
+    echo "  --fresh              Ignore checkpoint — restart from scratch"
+    echo "  --rate-delay <sec>   Delay between API-heavy tools (default: 5)"
+    echo "  -h, --help           Show this help message"
+    echo ""
+    echo -e "${BOLD}Environment:${NC}"
+    echo "  DISCORD_WEBHOOK      Discord webhook URL for notifications"
+    echo ""
+    echo -e "${BOLD}Examples:${NC}"
+    echo "  ./recon.sh forexfactory.com"
+    echo "  ./recon.sh -l targets.txt --nuclei"
+    echo "  DISCORD_WEBHOOK=\"https://discord.com/api/...\" ./recon.sh example.com"
     echo ""
 }
 
+# ─── ARGUMENT PARSING ───────────────────────────────────────
+parse_args() {
+    if [[ $# -eq 0 ]]; then
+        show_help
+        exit 1
+    fi
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -l|--list)
+                MODE="list"
+                TARGET_FILE="$2"
+                if [[ -z "$TARGET_FILE" ]] || [[ ! -f "$TARGET_FILE" ]]; then
+                    echo -e "${RED}[✗] Error: List file '$TARGET_FILE' not found${NC}"
+                    exit 1
+                fi
+                shift 2
+                ;;
+            -o|--output)
+                OUTPUT_DIR="$2"
+                shift 2
+                ;;
+            -n|--nuclei)
+                ENABLE_NUCLEI=true
+                shift
+                ;;
+            -s|--skip-install)
+                SKIP_INSTALL=true
+                shift
+                ;;
+            --timeout)
+                STAGE_TIMEOUT="$2"
+                shift 2
+                ;;
+            --fresh)
+                FRESH_RUN=true
+                shift
+                ;;
+            --rate-delay)
+                RATE_LIMIT_DELAY="$2"
+                shift 2
+                ;;
+            --threads)
+                THREADS="$2"
+                shift 2
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -*)
+                echo -e "${RED}[✗] Unknown option: $1${NC}"
+                show_help
+                exit 1
+                ;;
+            *)
+                if [[ -z "$MODE" ]]; then
+                    MODE="domain"
+                    DOMAIN="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$MODE" ]]; then
+        echo -e "${RED}[✗] Error: No target specified${NC}"
+        show_help
+        exit 1
+    fi
+}
+
+# ─── MAIN ────────────────────────────────────────────────────
 main() {
-    # Handle flags
-    case "${1:-}" in
-        --help|-h)
-            show_help
-            exit 0
-            ;;
-        --install)
-            show_banner
-            setup_go_env
-            install_dependencies
-            exit $?
-            ;;
-        --check)
-            show_banner
-            setup_go_env
-            run_preflight_check
-            exit $?
-            ;;
-        --list)
-            if [[ -z "${2:-}" ]]; then
-                log_error "--list requires a file path"
-                echo "Usage: $0 --list <domains.txt>"
-                exit 1
-            fi
-            show_banner
-            if ! setup_go_env; then
-                log_error "Failed to setup Go environment"
-                exit 1
-            fi
-            run_from_list "$2"
-            exit $?
-            ;;
-        "")
-            show_help
-            exit 1
-            ;;
-    esac
-    
-    # Single domain mode
-    show_banner
-    
-    # Setup Go environment
-    if ! setup_go_env; then
-        log_error "Failed to setup Go environment"
-        exit 1
+    SCRIPT_START=$(date +%s)
+
+    banner
+    parse_args "$@"
+
+    # Set up output directory
+    if [[ "$MODE" == "domain" ]]; then
+        OUTPUT_DIR="${OUTPUT_DIR}/${DOMAIN}"
     fi
-    
-    run_single_domain "$1"
+
+    # Convert to absolute path so cd in subshells doesn't break log paths
+    OUTPUT_DIR="$(mkdir -p "$OUTPUT_DIR" && cd "$OUTPUT_DIR" && pwd)"
+    LOG_DIR="$OUTPUT_DIR/logs"
+    CHECKPOINT_FILE="$OUTPUT_DIR/.recon_checkpoint"
+
+    # Create directory structure
+    mkdir -p "$OUTPUT_DIR"/{subdomains,urls,js/files,endpoints,params,logs}
+
+    # Handle checkpoint
+    if [[ "$FRESH_RUN" == "true" ]]; then
+        clear_checkpoint
+        log_info "Fresh run — checkpoint cleared"
+    elif [[ -f "$CHECKPOINT_FILE" ]]; then
+        log_info "Resuming from checkpoint — completed stages: $(paste -sd', ' "$CHECKPOINT_FILE")"
+    fi
+
+    # Initialize log
+    echo "═══ Recon started: $(date '+%d-%m-%Y %H:%M:%S') ═══" > "$LOG_DIR/recon.log"
+    echo "Target: ${DOMAIN:-$TARGET_FILE}" >> "$LOG_DIR/recon.log"
+    echo "Mode: $MODE" >> "$LOG_DIR/recon.log"
+    touch "$LOG_DIR/errors.log" "$LOG_DIR/install.log"
+
+    log_info "Target: ${DOMAIN:-$TARGET_FILE}"
+    log_info "Mode: $MODE"
+    log_info "Output: $OUTPUT_DIR"
+    [[ -n "$DISCORD_WEBHOOK" ]] && log_info "Discord notifications: enabled" || log_info "Discord notifications: disabled"
+
+    # Disk space check
+    local free_mb
+    free_mb=$(df -m "$OUTPUT_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [[ -n "$free_mb" ]] && [[ "$free_mb" -lt 500 ]]; then
+        log_warn "Low disk space: ${free_mb}MB free — may cause issues"
+    fi
+
+    # Discord: recon started
+    discord_notify "🚀 Recon started (mode: $MODE)"
+
+    # ─── Stage 0: Install tools ───
+    if [[ "$SKIP_INSTALL" != "true" ]]; then
+        install_all_tools
+    else
+        log_info "Skipping tool installation (--skip-install)"
+    fi
+
+    # Always ensure PATH and verify tools (even with --skip-install)
+    export PATH="$PATH:/usr/local/go/bin:$HOME/go/bin:$HOME/.local/bin"
+    verify_tools
+
+    # ─── Stage 1: Subdomains ───
+    check_checkpoint "stage_subdomains" || stage_subdomains
+
+    # ─── Stage 2: Live hosts ───
+    check_checkpoint "stage_livehost" || stage_livehost
+
+    # ─── Stage 3: URL collection ───
+    check_checkpoint "stage_urls" || stage_urls
+
+    # ─── Stage 4: JS analysis ───
+    check_checkpoint "stage_js_analysis" || stage_js_analysis
+
+    # ─── Stage 5: Parameter discovery ───
+    check_checkpoint "stage_params" || stage_params
+
+    # ─── Stage 6: Pattern matching ───
+    check_checkpoint "stage_patterns" || stage_patterns
+
+    # ─── Stage 7: Nuclei (optional) ───
+    check_checkpoint "stage_nuclei" || stage_nuclei
+
+    # ─── Stage 8: Summary ───
+    stage_summary
+
+    # All stages completed successfully — clear checkpoint
+    clear_checkpoint
+
+    log_success "All stages complete! Results saved to: $OUTPUT_DIR"
 }
 
-# Run main
+# Run
 main "$@"
