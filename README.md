@@ -1,6 +1,6 @@
-# Bug Bounty Recon Framework
+# OrsuRecon v3 — Elite Bug Bounty Recon Framework
 
-Production-grade automated reconnaissance framework for Kali Linux on WSL.
+Production-grade automated reconnaissance framework for Kali Linux, Ubuntu VPS, and WSL.
 
 ## Quick Start
 
@@ -17,66 +17,184 @@ chmod +x recon.sh
 
 ## Commands
 
-| Command                | Description                |
-| ---------------------- | -------------------------- |
-| `./recon.sh <domain>`  | Run full reconnaissance    |
-| `./recon.sh --install` | Install all dependencies   |
-| `./recon.sh --check`   | Validate tool installation |
-| `./recon.sh --help`    | Show usage information     |
+| Command                            | Description                              |
+| ---------------------------------- | ---------------------------------------- |
+| `./recon.sh <domain>`              | Run standard recon                       |
+| `./recon.sh <domain> --all`        | Run full recon with ALL features enabled |
+| `./recon.sh -l <file>`             | Process domain list (with sub enum)      |
+| `./recon.sh -l <file> -ns`         | Process target list (no sub enum)        |
+| `./recon.sh --install`             | Install all dependencies                 |
+| `./recon.sh --check`               | Validate tool installation               |
+| `./recon.sh --help`                | Show usage information                   |
+
+## v3 Pipeline (18 Stages)
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│                     OrsuRecon v3 Pipeline                      │
+├───────────────────────────────────────────────────────────────┤
+│                                                               │
+│   1.  Subdomain Enumeration      (subfinder, assetfinder)     │
+│   2.  DNS Resolution + Perms     (alterx, puredns, dnsx) NEW  │
+│   3.  Live Host Probing          (httpx)                      │
+│   4.  Port Scanning              (masscan → nmap)        NEW  │
+│   5.  Tech Fingerprinting        (whatweb, wafw00f)      NEW  │
+│   6.  Screenshots                (gowitness)             NEW  │
+│   7.  URL Collection             (gau, waybackurls, katana)   │
+│   8.  Content Fuzzing            (ffuf)                  NEW  │
+│   9.  JS Analysis                (jsluice, source maps)  UPG  │
+│  10.  Parameter Discovery        (ParamSpider, Arjun)         │
+│  11.  Pattern Matching           (gf patterns)                │
+│  12.  Subdomain Takeover         (subzy, nuclei)         NEW  │
+│  13.  CORS Scanning              (Corsy)                 NEW  │
+│  14.  Cloud Bucket Enum          (cloud_enum)            NEW  │
+│  15.  GitHub Secret Scanning     (trufflehog)            NEW  │
+│  16.  Nuclei Vuln Scan           (nuclei)                     │
+│  17.  OOB Blind Testing          (interactsh)            NEW  │
+│  18.  Summary & Report                                        │
+│                                                               │
+└───────────────────────────────────────────────────────────────┘
+```
+
+## Feature Flags
+
+| Flag               | Default | Description                                 |
+| ------------------- | ------- | ------------------------------------------- |
+| `--ports`           | OFF     | Port scanning (masscan + nmap)              |
+| `--fuzz`            | OFF     | Directory/content fuzzing (ffuf)            |
+| `--deep-js`         | ON      | Source maps + jsluice deep JS analysis      |
+| `--takeover`        | ON      | Subdomain takeover detection (subzy)        |
+| `--cors`            | ON      | CORS misconfiguration scanning              |
+| `--cloud`           | OFF     | Cloud bucket enumeration (S3/Azure/GCP)     |
+| `--github`          | OFF     | GitHub secret scanning (needs GITHUB_TOKEN) |
+| `--screenshots`     | ON      | Screenshot capture (gowitness)              |
+| `--stealth`         | OFF     | Passive-only — no active scanning           |
+| `--all`             | —       | Enable ALL features                         |
+| `-n, --nuclei`      | OFF     | Nuclei vulnerability scanning               |
 
 ## Output Structure
 
 ```
-recon-<domain>-<timestamp>/
-├── subdomains/      # Discovered subdomains
-│   ├── subfinder.txt
-│   ├── amass.txt
-│   └── all.txt      # Merged, deduplicated
-├── live/            # HTTP/HTTPS validated hosts
-│   ├── alive.txt
-│   └── alive.json
-├── screenshots/     # Visual captures (PNG)
-├── js/              # JavaScript analysis
-│   ├── files.txt    # .js file URLs
-│   └── endpoints.txt # API endpoints
-├── urls/            # All discovered URLs
-│   ├── gau.txt      # Historical
-│   ├── katana.txt   # Live crawl
-│   └── all.txt      # Merged
-├── params/          # Extracted parameters
-│   ├── raw.txt
-│   ├── unique.txt
-│   └── filtered.txt # Without tracking params
-├── interesting/     # High-value endpoints
-│   ├── auth.txt
-│   ├── admin.txt
-│   ├── api.txt
-│   ├── debug.txt
-│   ├── files.txt
-│   └── config.txt
+recon-output/<domain>/
+├── subdomains/        # Discovered subdomains
+│   ├── all.txt        # Merged, deduplicated, resolved
+│   ├── ips.txt        # Extracted IP addresses
+│   └── cnames.txt     # CNAME records (for takeover)
+├── ports/             # Port scan results
+│   ├── open_ports.txt
+│   ├── interesting_ports.txt  # Non-80/443 ports
+│   └── nmap_results.txt
+├── tech/              # Technology fingerprints
+│   ├── fingerprints.txt
+│   └── waf_results.txt
+├── screenshots/       # Visual captures (PNG)
+├── urls/              # All discovered URLs
+│   ├── all_urls.txt
+│   └── inscope_urls.txt
+├── fuzzing/           # ffuf directory findings
+│   └── all_findings.txt
+├── js/                # JavaScript analysis
+│   ├── js_urls.txt
+│   ├── jsluice_urls.txt      # Deep endpoint extraction
+│   ├── jsluice_secrets.txt   # Secret patterns
+│   ├── sourcemaps/           # .js.map files (full source!)
+│   ├── api_routes.txt        # /api/, /v1/, /internal/ routes
+│   ├── internal_ips.txt      # 10.x, 192.168.x, 172.x IPs
+│   └── dom_sinks.txt         # XSS-prone DOM patterns
+├── endpoints/         # All discovered endpoints
+├── params/            # GF pattern matches
+│   ├── xss.txt, sqli.txt, ssrf.txt, lfi.txt
+│   └── redirect.txt, idor.txt
+├── takeover/          # Subdomain takeover results
+│   ├── subzy_results.txt
+│   └── cname_map.txt
+├── vulns/             # Vulnerability findings
+│   ├── cors_results.json
+│   └── cors_vulnerable.txt
+├── cloud/             # Cloud bucket discoveries
+├── secrets/           # GitHub leaked secrets
+│   └── trufflehog_results.json
+├── oob/               # Out-of-band testing
+│   └── blind_testing_url.txt
 └── logs/
     ├── recon.log
-    └── module_status.log
+    ├── errors.log
+    └── summary.txt
 ```
 
-## Tools Used
+## Tools Used (30+)
 
-| Tool      | Purpose                       | Install Source |
-| --------- | ----------------------------- | -------------- |
-| subfinder | Passive subdomain enumeration | `go install`   |
-| amass     | Additional subdomain sources  | `go install`   |
-| httpx     | HTTP/HTTPS probing            | `go install`   |
-| gowitness | Screenshots                   | `go install`   |
-| gau       | Historical URL harvesting     | `go install`   |
-| katana    | Live crawling                 | `go install`   |
-| unfurl    | Parameter extraction          | `go install`   |
+| Tool | Purpose | Source |
+| --- | --- | --- |
+| subfinder | Passive subdomain enumeration | `go install` |
+| assetfinder | Additional subdomain sources | `go install` |
+| alterx | Subdomain permutation generation | `go install` |
+| puredns | DNS resolution + wildcard filtering | `go install` |
+| dnsx | DNS record queries (A, CNAME) | `go install` |
+| httpx | HTTP/HTTPS probing + tech detect | `go install` |
+| masscan | Fast port scanning | `apt install` |
+| nmap | Service/version detection | `apt install` |
+| whatweb | Technology fingerprinting | `apt install` |
+| wafw00f | WAF detection | `apt install` |
+| gowitness | Screenshot capture | `go install` |
+| gau | Historical URL harvesting | `go install` |
+| waybackurls | Wayback Machine URLs | `go install` |
+| katana | Live crawling | `go install` |
+| hakrawler | Additional crawling | `go install` |
+| ffuf | Directory/content fuzzing | `go install` |
+| jsluice | Advanced JS analysis (AST-based) | `go install` |
+| LinkFinder | JS endpoint extraction | `git clone` |
+| SecretFinder | JS secret detection | `git clone` |
+| ParamSpider | Parameter discovery | `git clone` |
+| arjun | Hidden parameter detection | `pip install` |
+| gf | Pattern-based URL matching | `go install` |
+| subzy | Subdomain takeover detection | `go install` |
+| Corsy | CORS misconfiguration scanner | `git clone` |
+| cloud_enum | S3/Azure/GCP bucket discovery | `git clone` |
+| trufflehog | GitHub secret scanning | `go install` |
+| nuclei | Vulnerability scanning | `go install` |
+| interactsh | Out-of-band blind testing | `go install` |
 
-## WSL Notes
+## Environment Variables
 
-- **First run**: Execute `./recon.sh --install` to install all dependencies
-- **Screenshots**: Uses Chromium with `--no-sandbox` for WSL compatibility
-- **PATH**: Go binaries are installed to `$HOME/go/bin` (auto-added to PATH)
-- **Output**: Always outputs to Linux filesystem, not `/mnt/c/`
+| Variable | Purpose |
+| --- | --- |
+| `DISCORD_WEBHOOK` | Discord webhook URL for notifications |
+| `GITHUB_TOKEN` | GitHub personal access token for trufflehog |
+
+## Examples
+
+```bash
+# Standard recon on a single domain
+./recon.sh example.com
+
+# Full recon with ALL features enabled
+./recon.sh example.com --all
+
+# Add port scanning and fuzzing
+./recon.sh example.com --ports --fuzz
+
+# Process domain list (enumerate subs first)
+./recon.sh -l domains.txt
+
+# Explicit targets, no sub enumeration
+./recon.sh -l targets.txt -ns
+
+# Passive-only recon (stealth mode)
+./recon.sh example.com --stealth
+
+# GitHub + cloud scanning
+GITHUB_TOKEN="ghp_..." ./recon.sh example.com --github --cloud
+
+# Custom fuzzing wordlist
+./recon.sh example.com --fuzz --wordlist /path/to/wordlist.txt
+
+# Resume a failed/interrupted scan
+./recon.sh example.com
+
+# Restart fresh (ignore checkpoint)
+./recon.sh example.com --fresh
+```
 
 ## Configuration
 
@@ -84,82 +202,28 @@ Edit variables at the top of `recon.sh`:
 
 ```bash
 # Timeouts (seconds)
-TIMEOUT_SUBDOMAIN=600    # 10 min
-TIMEOUT_HTTPX=300        # 5 min
-TIMEOUT_SCREENSHOT=600   # 10 min
+STAGE_TIMEOUT=300        # Per-stage timeout
 
 # Rate limits
-RATE_HTTPX=50            # Concurrent threads
-RATE_CRAWL=10            # Crawl concurrency
-```
+THREADS=5                # Concurrent threads
+RATE_LIMIT_DELAY=5       # Delay between API-heavy tools
 
-## Safe Extensions
-
-### Adding New Subdomain Sources
-
-```bash
-# Add to mod_subdomain_enum function
-mod_subdomain_enum() {
-    # ... existing code ...
-
-    # Add new source
-    if command -v new_tool &>/dev/null; then
-        log_info "Running new_tool..."
-        new_tool -d "$DOMAIN" -o "$SUBDOMAINS_DIR/new_tool.txt"
-    fi
-
-    # Merge happens automatically from all .txt files
-}
-```
-
-### Adding New Interesting Patterns
-
-```bash
-# Add to mod_interesting_endpoints function
-grep -iE '(payment|checkout|billing|stripe|paypal)' "$input" | \
-    sort -u > "$INTERESTING_DIR/payment.txt"
-```
-
-### Adding API Key Support
-
-For subfinder API keys, create `~/.config/subfinder/provider-config.yaml`:
-
-```yaml
-securitytrails:
-  - YOUR_API_KEY
-shodan:
-  - YOUR_API_KEY
-virustotal:
-  - YOUR_API_KEY
-```
-
-### Custom Post-Processing
-
-Add hooks at the end of `main_pipeline`:
-
-```bash
-main_pipeline() {
-    # ... existing modules ...
-
-    # Custom post-processing
-    run_module "Custom Analysis" my_custom_module ""
-}
-
-my_custom_module() {
-    # Your custom logic here
-    log_info "Running custom analysis..."
-}
+# JS analysis
+JS_DOWNLOAD_LIMIT=200    # Max JS files to download
+JS_PARALLEL_DOWNLOADS=10 # Concurrent JS downloads
 ```
 
 ## Troubleshooting
 
-| Issue                   | Solution                               |
-| ----------------------- | -------------------------------------- |
-| `go: command not found` | `sudo apt install golang-go`           |
-| Tool not in PATH        | Restart terminal or `source ~/.bashrc` |
-| Screenshots fail        | Check chromium: `chromium --version`   |
-| Timeouts on large scope | Increase `TIMEOUT_*` values            |
-| Rate limited            | Reduce `RATE_*` values                 |
+| Issue | Solution |
+| --- | --- |
+| `go: command not found` | `sudo apt install golang-go` |
+| Tool not in PATH | Restart terminal or `source ~/.bashrc` |
+| Screenshots fail | Check chromium: `chromium --version` |
+| Timeouts on large scope | Increase `--timeout` value |
+| Rate limited | Increase `--rate-delay` value |
+| masscan needs root | Run with `sudo` or as root |
+| puredns no results | Check resolvers: `$HOME/tools/resolvers.txt` |
 
 ## Legal Notice
 
